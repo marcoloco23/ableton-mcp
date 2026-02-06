@@ -3,8 +3,8 @@ revision = 1
 requires-python = ">=3.10"
 
 [[package]]
-name = "ableton-mcp"
-version = "0.1.0"
+name = "ableton-mcp-macwhite"
+version = "2.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "mcp", extra = ["cli"] },
