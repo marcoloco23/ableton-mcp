@@ -102,6 +102,9 @@ class AbletonConnection:
             "delete_clip", "set_metronome", "tap_tempo", "set_macro_value", "capture_midi", "apply_groove",
             "freeze_track", "unfreeze_track", "export_track_audio",
             "create_return_track", "delete_track", "duplicate_track", "set_track_arm",
+            "set_chain_device_parameter",
+            "delete_device", "delete_chain_device",
+            "set_return_track_name", "load_on_return_track",
         ]
         try:
             logger.info(f"Sending command: {command_type} with params: {params}")

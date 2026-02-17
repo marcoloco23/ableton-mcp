@@ -38,11 +38,23 @@ MODIFYING_COMMANDS = [
     "delete_clip", "set_metronome", "tap_tempo", "set_macro_value", "capture_midi", "apply_groove",
     "freeze_track", "unfreeze_track", "export_track_audio",
     "create_return_track", "delete_track", "duplicate_track", "set_track_arm",
+    "set_chain_device_parameter",
+    "delete_device", "delete_chain_device",
+    "set_return_track_name", "load_on_return_track",
 ]
 
 
 def create_instance(c_instance):
     """Create and return the AbletonMCP script instance."""
+    # Force-reload handler modules so toggling the control surface picks up code changes
+    import importlib
+    for submod_name in list(handlers.__dict__):
+        submod = getattr(handlers, submod_name, None)
+        if hasattr(submod, "__file__"):
+            try:
+                importlib.reload(submod)
+            except Exception:
+                pass
     return AbletonMCP(c_instance)
 
 
@@ -215,6 +227,25 @@ class AbletonMCP(ControlSurface):
                 response["result"] = handlers.arrangement.get_arrangement_clips(
                     song, params.get("track_index", 0), ctrl
                 )
+            elif command_type == "get_chain_devices":
+                response["result"] = handlers.devices.get_chain_devices(
+                    song,
+                    params.get("track_index", 0),
+                    params.get("device_index", 0),
+                    params.get("chain_index", 0),
+                    params.get("track_type", "track"),
+                    ctrl,
+                )
+            elif command_type == "get_chain_device_parameters":
+                response["result"] = handlers.devices.get_chain_device_parameters(
+                    song,
+                    params.get("track_index", 0),
+                    params.get("device_index", 0),
+                    params.get("chain_index", 0),
+                    params.get("chain_device_index", 0),
+                    params.get("track_type", "track"),
+                    ctrl,
+                )
             elif command_type == "get_macro_values":
                 response["result"] = handlers.devices.get_macro_values(
                     song,
@@ -379,6 +410,41 @@ class AbletonMCP(ControlSurface):
                     response["status"] = "error"
                     response["message"] = "Timeout waiting for operation to complete"
 
+            # ---- Dynamic dispatch (hot-reloadable) ----
+            elif handlers.dispatch.is_known(command_type):
+                if handlers.dispatch.is_modifying(command_type):
+                    response_queue = queue.Queue()
+
+                    def dynamic_main_thread_task():
+                        try:
+                            result = handlers.dispatch.execute(
+                                command_type, params, song, ctrl
+                            )
+                            response_queue.put({"status": "success", "result": result})
+                        except Exception as e:
+                            self.log_message("Error in dynamic dispatch: " + str(e))
+                            self.log_message(traceback.format_exc())
+                            response_queue.put({"status": "error", "message": str(e)})
+
+                    try:
+                        self.schedule_message(0, dynamic_main_thread_task)
+                    except AssertionError:
+                        dynamic_main_thread_task()
+                    try:
+                        task_response = response_queue.get(timeout=10.0)
+                        if task_response.get("status") == "error":
+                            response["status"] = "error"
+                            response["message"] = task_response.get("message", "Unknown error")
+                        else:
+                            response["result"] = task_response.get("result", {})
+                    except queue.Empty:
+                        response["status"] = "error"
+                        response["message"] = "Timeout waiting for dynamic operation"
+                else:
+                    response["result"] = handlers.dispatch.execute(
+                        command_type, params, song, ctrl
+                    )
+
             else:
                 response["status"] = "error"
                 response["message"] = "Unknown command: " + command_type
@@ -447,7 +513,7 @@ def _dispatch_modifying(command_type, params, song, ctrl):
         return handlers.browser.load_browser_item(
             song,
             p.get("track_index", 0),
-            p.get("item_uri", ""),
+            p.get("uri", p.get("item_uri", "")),
             ctrl,
         )
     if command_type == "arm_track":
@@ -515,6 +581,36 @@ def _dispatch_modifying(command_type, params, song, ctrl):
             p.get("device_index", 0),
             p.get("parameter_index", 0),
             p.get("value", 0.0),
+            p.get("track_type", "track"),
+            ctrl,
+        )
+    if command_type == "set_chain_device_parameter":
+        return handlers.devices.set_chain_device_parameter(
+            song,
+            p.get("track_index", 0),
+            p.get("device_index", 0),
+            p.get("chain_index", 0),
+            p.get("chain_device_index", 0),
+            p.get("parameter_index", 0),
+            p.get("value", 0.0),
+            p.get("track_type", "track"),
+            ctrl,
+        )
+    if command_type == "delete_device":
+        return handlers.devices.delete_device(
+            song,
+            p.get("track_index", 0),
+            p.get("device_index", 0),
+            p.get("track_type", "track"),
+            ctrl,
+        )
+    if command_type == "delete_chain_device":
+        return handlers.devices.delete_chain_device(
+            song,
+            p.get("track_index", 0),
+            p.get("device_index", 0),
+            p.get("chain_index", 0),
+            p.get("chain_device_index", 0),
             p.get("track_type", "track"),
             ctrl,
         )
@@ -746,6 +842,20 @@ def _dispatch_modifying(command_type, params, song, ctrl):
             song,
             p.get("track_index", 0),
             p.get("arm", True),
+            ctrl,
+        )
+    if command_type == "set_return_track_name":
+        return handlers.tracks.set_return_track_name(
+            song,
+            p.get("return_index", 0),
+            p.get("name", ""),
+            ctrl,
+        )
+    if command_type == "load_on_return_track":
+        return handlers.browser.load_on_return_track(
+            song,
+            p.get("return_index", 0),
+            p.get("uri", ""),
             ctrl,
         )
     raise ValueError("Unknown modifying command: " + command_type)

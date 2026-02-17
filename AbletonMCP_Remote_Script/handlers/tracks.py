@@ -34,19 +34,24 @@ def get_track_info(song, track_index, ctrl=None):
                 "class_name": device.class_name,
                 "type": dev_mod.get_device_type(device, ctrl),
             })
-        return {
+        result = {
             "index": track_index,
             "name": track.name,
             "is_audio_track": track.has_audio_input,
             "is_midi_track": track.has_midi_input,
             "mute": track.mute,
             "solo": track.solo,
-            "arm": track.arm,
+            "arm": False,
             "volume": track.mixer_device.volume.value,
             "panning": track.mixer_device.panning.value,
             "clip_slots": clip_slots,
             "devices": devices_list,
         }
+        try:
+            result["arm"] = track.arm
+        except Exception:
+            pass
+        return result
     except Exception as e:
         if ctrl:
             ctrl.log_message("Error getting track info: " + str(e))
@@ -252,6 +257,20 @@ def get_all_tracks_info(song, ctrl=None):
     except Exception as e:
         if ctrl:
             ctrl.log_message("Error getting all tracks info: " + str(e))
+        raise
+
+
+def set_return_track_name(song, return_index, name, ctrl=None):
+    """Set the name of a return track."""
+    try:
+        if return_index < 0 or return_index >= len(song.return_tracks):
+            raise IndexError("Return track index out of range")
+        track = song.return_tracks[return_index]
+        track.name = name
+        return {"index": return_index, "name": track.name}
+    except Exception as e:
+        if ctrl:
+            ctrl.log_message("Error setting return track name: " + str(e))
         raise
 
 

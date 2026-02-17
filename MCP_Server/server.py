@@ -3,6 +3,7 @@
 
 import logging
 import time
+from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Dict
 
 from mcp.server.fastmcp import FastMCP
@@ -19,6 +20,7 @@ logger = logging.getLogger("AbletonMCPServer")
 _ableton_connection: Any = None
 
 
+@asynccontextmanager
 async def server_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
     """Manage server startup and shutdown lifecycle."""
     try:

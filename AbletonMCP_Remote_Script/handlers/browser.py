@@ -21,6 +21,7 @@ def find_browser_item_by_uri(
                 browser_or_item.drums,
                 browser_or_item.audio_effects,
                 browser_or_item.midi_effects,
+                browser_or_item.plugins,
             ]
             for category in categories:
                 item = find_browser_item_by_uri(
@@ -69,7 +70,7 @@ def get_browser_item(song, uri, path, ctrl=None):
         if path:
             path_parts = path.split("/")
             current_item = None
-            if path_parts[0].lower() == "nstruments":
+            if path_parts[0].lower() == "instruments":
                 current_item = app.browser.instruments
             elif path_parts[0].lower() == "sounds":
                 current_item = app.browser.sounds
@@ -79,6 +80,8 @@ def get_browser_item(song, uri, path, ctrl=None):
                 current_item = app.browser.audio_effects
             elif path_parts[0].lower() == "midi_effects":
                 current_item = app.browser.midi_effects
+            elif path_parts[0].lower() == "plugins":
+                current_item = app.browser.plugins
             else:
                 current_item = app.browser.instruments
                 path_parts = ["instruments"] + path_parts
@@ -147,6 +150,40 @@ def load_browser_item(song, track_index, item_uri, ctrl=None):
 def load_instrument_or_effect(song, track_index, uri, ctrl=None):
     """Load an instrument or effect onto a track by URI (alias for load_browser_item)."""
     return load_browser_item(song, track_index, uri, ctrl)
+
+
+def load_on_return_track(song, return_index, uri, ctrl=None):
+    """Load an instrument or effect onto a return track by URI."""
+    try:
+        if return_index < 0 or return_index >= len(song.return_tracks):
+            raise IndexError("Return track index out of range")
+        track = song.return_tracks[return_index]
+        if ctrl is None:
+            raise RuntimeError(
+                "load_on_return_track requires ctrl for application()"
+            )
+        app = ctrl.application()
+        item = find_browser_item_by_uri(app.browser, uri, ctrl=ctrl)
+        if not item:
+            raise ValueError(
+                "Browser item with URI '{0}' not found".format(uri)
+            )
+        song.view.selected_track = track
+        app.browser.load_item(item)
+        return {
+            "loaded": True,
+            "item_name": item.name,
+            "track_name": track.name,
+            "return_index": return_index,
+            "uri": uri,
+        }
+    except Exception as e:
+        if ctrl:
+            ctrl.log_message(
+                "Error loading on return track: {0}".format(str(e))
+            )
+            ctrl.log_message(traceback.format_exc())
+        raise
 
 
 def _process_item(item):
