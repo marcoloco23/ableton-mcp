@@ -592,6 +592,125 @@ def move_to_group(song, track_name=None, track_index=None,
         raise
 
 
+def get_track_routing(song, track_index, track_type="track", ctrl=None):
+    """Get output routing info for a track: current routing and available options."""
+    try:
+        if track_type == "return":
+            if track_index < 0 or track_index >= len(song.return_tracks):
+                raise IndexError("Return track index out of range")
+            track = song.return_tracks[track_index]
+        elif track_type == "master":
+            track = song.master_track
+        else:
+            if track_index < 0 or track_index >= len(song.tracks):
+                raise IndexError("Track index out of range")
+            track = song.tracks[track_index]
+
+        current_type = None
+        current_channel = None
+        try:
+            rt = track.output_routing_type
+            current_type = rt.display_name if rt else None
+        except Exception:
+            pass
+        try:
+            rc = track.output_routing_channel
+            current_channel = rc.display_name if rc else None
+        except Exception:
+            pass
+
+        available_types = []
+        try:
+            for rt in track.available_output_routing_types:
+                available_types.append(rt.display_name)
+        except Exception:
+            pass
+
+        available_channels = []
+        try:
+            for rc in track.available_output_routing_channels:
+                available_channels.append(rc.display_name)
+        except Exception:
+            pass
+
+        return {
+            "index": track_index,
+            "name": track.name,
+            "track_type": track_type,
+            "output_routing_type": current_type,
+            "output_routing_channel": current_channel,
+            "available_output_routing_types": available_types,
+            "available_output_routing_channels": available_channels,
+        }
+    except Exception as e:
+        if ctrl:
+            ctrl.log_message("Error getting track routing: " + str(e))
+        raise
+
+
+def set_track_routing(song, track_index, output_type=None, output_channel=None,
+                      track_type="track", ctrl=None):
+    """Set output routing for a track by display name.
+
+    Args:
+        track_index: Index of track.
+        output_type: Display name of output routing type (e.g. "SUB LIMITER").
+        output_channel: Display name of output routing channel (e.g. "Track In").
+        track_type: "track", "return", or "master".
+    """
+    try:
+        if track_type == "return":
+            if track_index < 0 or track_index >= len(song.return_tracks):
+                raise IndexError("Return track index out of range")
+            track = song.return_tracks[track_index]
+        elif track_type == "master":
+            track = song.master_track
+        else:
+            if track_index < 0 or track_index >= len(song.tracks):
+                raise IndexError("Track index out of range")
+            track = song.tracks[track_index]
+
+        result = {"index": track_index, "name": track.name, "track_type": track_type}
+
+        if output_type is not None:
+            found = False
+            for rt in track.available_output_routing_types:
+                if rt.display_name == output_type:
+                    track.output_routing_type = rt
+                    result["output_routing_type"] = rt.display_name
+                    found = True
+                    break
+            if not found:
+                available = [rt.display_name for rt in track.available_output_routing_types]
+                raise ValueError(
+                    "Output routing type '{0}' not found. Available: {1}".format(
+                        output_type, ", ".join(available)
+                    )
+                )
+
+        if output_channel is not None:
+            found = False
+            for rc in track.available_output_routing_channels:
+                if rc.display_name == output_channel:
+                    track.output_routing_channel = rc
+                    result["output_routing_channel"] = rc.display_name
+                    found = True
+                    break
+            if not found:
+                available = [rc.display_name for rc in track.available_output_routing_channels]
+                raise ValueError(
+                    "Output routing channel '{0}' not found. Available: {1}".format(
+                        output_channel, ", ".join(available)
+                    )
+                )
+
+        return result
+    except Exception as e:
+        if ctrl:
+            ctrl.log_message("Error setting track routing: " + str(e))
+        raise
+
+
 def get_return_tracks_info(song, ctrl=None):
     """Get info for all return tracks."""
     try:

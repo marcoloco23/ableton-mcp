@@ -9,6 +9,109 @@ from __future__ import absolute_import, print_function, unicode_literals
 from . import tracks, browser, devices, arrangement, audio
 
 
+def _resolve_track(song, track_index, track_type):
+    """Resolve a track object from index and type."""
+    if track_type == "return":
+        if track_index < 0 or track_index >= len(song.return_tracks):
+            raise IndexError("Return track index out of range")
+        return song.return_tracks[track_index]
+    elif track_type == "master":
+        return song.master_track
+    else:
+        if track_index < 0 or track_index >= len(song.tracks):
+            raise IndexError("Track index out of range")
+        return song.tracks[track_index]
+
+
+def _get_track_routing(song, p, ctrl):
+    """Get output routing info for a track."""
+    track_index = p.get("track_index", 0)
+    track_type = p.get("track_type", "track")
+    track = _resolve_track(song, track_index, track_type)
+
+    current_type = None
+    current_channel = None
+    try:
+        rt = track.output_routing_type
+        current_type = rt.display_name if rt else None
+    except Exception:
+        pass
+    try:
+        rc = track.output_routing_channel
+        current_channel = rc.display_name if rc else None
+    except Exception:
+        pass
+
+    available_types = []
+    try:
+        for rt in track.available_output_routing_types:
+            available_types.append(rt.display_name)
+    except Exception:
+        pass
+
+    available_channels = []
+    try:
+        for rc in track.available_output_routing_channels:
+            available_channels.append(rc.display_name)
+    except Exception:
+        pass
+
+    return {
+        "index": track_index,
+        "name": track.name,
+        "track_type": track_type,
+        "output_routing_type": current_type,
+        "output_routing_channel": current_channel,
+        "available_output_routing_types": available_types,
+        "available_output_routing_channels": available_channels,
+    }
+
+
+def _set_track_routing(song, p, ctrl):
+    """Set output routing for a track by display name."""
+    track_index = p.get("track_index", 0)
+    track_type = p.get("track_type", "track")
+    output_type = p.get("output_type", None)
+    output_channel = p.get("output_channel", None)
+    track = _resolve_track(song, track_index, track_type)
+
+    result = {"index": track_index, "name": track.name, "track_type": track_type}
+
+    if output_type is not None:
+        found = False
+        for rt in track.available_output_routing_types:
+            if rt.display_name == output_type:
+                track.output_routing_type = rt
+                result["output_routing_type"] = rt.display_name
+                found = True
+                break
+        if not found:
+            available = [rt.display_name for rt in track.available_output_routing_types]
+            raise ValueError(
+                "Output type '{0}' not found. Available: {1}".format(
+                    output_type, ", ".join(available)
+                )
+            )
+
+    if output_channel is not None:
+        found = False
+        for rc in track.available_output_routing_channels:
+            if rc.display_name == output_channel:
+                track.output_routing_channel = rc
+                result["output_routing_channel"] = rc.display_name
+                found = True
+                break
+        if not found:
+            available = [rc.display_name for rc in track.available_output_routing_channels]
+            raise ValueError(
+                "Output channel '{0}' not found. Available: {1}".format(
+                    output_channel, ", ".join(available)
+                )
+            )
+
+    return result
+
+
 def _move_device(song, p, ctrl):
     """Move a device to a new position on a track."""
     track_index = p.get("track_index", 0)
@@ -122,6 +225,14 @@ def _get_registry():
                 p.get("device_uris", None),
                 ctrl,
             ),
+            "modifying": True,
+        },
+        "get_track_routing": {
+            "handler": lambda song, p, ctrl: _get_track_routing(song, p, ctrl),
+            "modifying": False,
+        },
+        "set_track_routing": {
+            "handler": lambda song, p, ctrl: _set_track_routing(song, p, ctrl),
             "modifying": True,
         },
     }

@@ -41,7 +41,6 @@ MODIFYING_COMMANDS = [
     "set_chain_device_parameter",
     "delete_device", "delete_chain_device",
     "set_return_track_name", "load_on_return_track",
-    "switch_to_view", "record_arrangement_clip",
 ]
 
 
@@ -49,13 +48,22 @@ def create_instance(c_instance):
     """Create and return the AbletonMCP script instance."""
     # Force-reload handler modules so toggling the control surface picks up code changes
     import importlib
-    for submod_name in list(handlers.__dict__):
+    import traceback as _tb
+    for submod_name in sorted(handlers.__dict__):
         submod = getattr(handlers, submod_name, None)
         if hasattr(submod, "__file__"):
             try:
                 importlib.reload(submod)
-            except Exception:
-                pass
+            except Exception as _e:
+                # Log reload errors instead of silently swallowing them
+                try:
+                    c_instance.log_message(
+                        "Reload error for {0}: {1}\n{2}".format(
+                            submod_name, _e, _tb.format_exc()
+                        )
+                    )
+                except Exception:
+                    pass
     return AbletonMCP(c_instance)
 
 
@@ -227,14 +235,6 @@ class AbletonMCP(ControlSurface):
             elif command_type == "get_arrangement_clips":
                 response["result"] = handlers.arrangement.get_arrangement_clips(
                     song, params.get("track_index", 0), ctrl
-                )
-            elif command_type == "get_rack_device_info":
-                response["result"] = handlers.devices.get_rack_device_info(
-                    song,
-                    params.get("track_index", 0),
-                    params.get("device_index", 0),
-                    params.get("track_type", "track"),
-                    ctrl,
                 )
             elif command_type == "get_chain_devices":
                 response["result"] = handlers.devices.get_chain_devices(
@@ -865,20 +865,6 @@ def _dispatch_modifying(command_type, params, song, ctrl):
             song,
             p.get("return_index", 0),
             p.get("uri", ""),
-            ctrl,
-        )
-    if command_type == "switch_to_view":
-        return handlers.session.switch_to_view(
-            song,
-            p.get("view_name", "session"),
-            ctrl,
-        )
-    if command_type == "record_arrangement_clip":
-        return handlers.session.record_arrangement_clip(
-            song,
-            p.get("track_index", 0),
-            p.get("clip_index", 0),
-            p.get("start_time", 0.0),
             ctrl,
         )
     raise ValueError("Unknown modifying command: " + command_type)
