@@ -53,3 +53,37 @@ def register(mcp: Any, get_ableton_connection: Callable[[], Any]) -> None:
         except Exception as e:
             logger.error(f"Error stopping playback: {str(e)}")
             return f"Error stopping playback: {str(e)}"
+
+    @mcp.tool()
+    def switch_to_view(ctx: Context, view_name: str) -> str:
+        """Switch Live UI view. Parameters: view_name ('session' or 'arrangement')."""
+        try:
+            ableton = get_ableton_connection()
+            result = ableton.send_command("switch_to_view", {"view_name": view_name})
+            return json.dumps(result, indent=2)
+        except Exception as e:
+            logger.error(f"Error switching view: {str(e)}")
+            return f"Error switching view: {str(e)}"
+
+    @mcp.tool()
+    def record_arrangement_clip(
+        ctx: Context,
+        track_index: int,
+        clip_index: int,
+        start_time: float = 0.0,
+    ) -> str:
+        """Start arrangement recording and fire a session clip at start_time."""
+        try:
+            ableton = get_ableton_connection()
+            result = ableton.send_command(
+                "record_arrangement_clip",
+                {
+                    "track_index": track_index,
+                    "clip_index": clip_index,
+                    "start_time": start_time,
+                },
+            )
+            return json.dumps(result, indent=2)
+        except Exception as e:
+            logger.error(f"Error recording arrangement clip: {str(e)}")
+            return f"Error recording arrangement clip: {str(e)}"

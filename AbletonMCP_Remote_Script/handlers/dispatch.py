@@ -6,7 +6,7 @@ Toggle control surface off/on to pick up changes.
 
 from __future__ import absolute_import, print_function, unicode_literals
 
-from . import tracks, browser, devices
+from . import tracks, browser, devices, arrangement, audio
 
 
 def _move_device(song, p, ctrl):
@@ -51,6 +51,77 @@ def _get_registry():
         },
         "move_device": {
             "handler": lambda song, p, ctrl: _move_device(song, p, ctrl),
+            "modifying": True,
+        },
+        "get_track_meters": {
+            "handler": lambda song, p, ctrl: tracks.get_track_meters(
+                song,
+                p.get("track_indices", None),
+                p.get("include_returns", False),
+                p.get("include_master", False),
+                ctrl,
+            ),
+            "modifying": False,
+        },
+        "inspect_arrangement_clip": {
+            "handler": lambda song, p, ctrl: arrangement.inspect_arrangement_clip(
+                song,
+                p.get("track_index", 0),
+                p.get("arrangement_clip_index", 0),
+                ctrl,
+            ),
+            "modifying": False,
+        },
+        "get_all_clip_gains": {
+            "handler": lambda song, p, ctrl: audio.get_all_clip_gains(
+                song, p.get("track_indices", None), ctrl
+            ),
+            "modifying": False,
+        },
+        "set_clip_gain": {
+            "handler": lambda song, p, ctrl: audio.set_clip_gain(
+                song,
+                p.get("track_index", 0),
+                p.get("clip_index", 0),
+                p.get("gain", 0.5),
+                ctrl,
+            ),
+            "modifying": True,
+        },
+        "copy_arrangement_to_session": {
+            "handler": lambda song, p, ctrl: arrangement.copy_arrangement_to_session(
+                song,
+                p.get("track_index", 0),
+                p.get("arrangement_clip_index", 0),
+                p.get("clip_slot_index", 0),
+                ctrl,
+            ),
+            "modifying": True,
+        },
+        "get_group_structure": {
+            "handler": lambda song, p, ctrl: tracks.get_group_structure(song, ctrl),
+            "modifying": False,
+        },
+        "relocate_track": {
+            "handler": lambda song, p, ctrl: tracks.relocate_track(
+                song,
+                p.get("source_index", 0),
+                p.get("target_index", 0),
+                p.get("device_uris", None),
+                ctrl,
+            ),
+            "modifying": True,
+        },
+        "move_to_group": {
+            "handler": lambda song, p, ctrl: tracks.move_to_group(
+                song,
+                p.get("track_name", None),
+                p.get("track_index", None),
+                p.get("group_name", ""),
+                p.get("position", "last"),
+                p.get("device_uris", None),
+                ctrl,
+            ),
             "modifying": True,
         },
     }

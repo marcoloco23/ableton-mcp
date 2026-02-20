@@ -105,6 +105,7 @@ class AbletonConnection:
             "set_chain_device_parameter",
             "delete_device", "delete_chain_device",
             "set_return_track_name", "load_on_return_track",
+            "switch_to_view", "record_arrangement_clip",
         ]
         try:
             logger.info(f"Sending command: {command_type} with params: {params}")

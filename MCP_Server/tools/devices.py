@@ -55,6 +55,28 @@ def register(mcp: Any, get_ableton_connection: Callable[[], Any]) -> None:
             return f"Error setting device parameter: {str(e)}"
 
     @mcp.tool()
+    def get_rack_device_info(
+        ctx: Context,
+        track_index: int,
+        device_index: int,
+        track_type: str = "track",
+    ) -> str:
+        """Get detailed information about a rack device's chains and nested devices.
+        Recursively serializes all chains and devices. Parameters: track_index,
+        device_index (the rack), track_type ('track'|'return'|'master')."""
+        try:
+            ableton = get_ableton_connection()
+            result = ableton.send_command("get_rack_device_info", {
+                "track_index": track_index,
+                "device_index": device_index,
+                "track_type": track_type,
+            })
+            return json.dumps(result, indent=2)
+        except Exception as e:
+            logger.error(f"Error getting rack device info: {str(e)}")
+            return "Error getting rack device info"
+
+    @mcp.tool()
     def get_chain_devices(
         ctx: Context,
         track_index: int,

@@ -3,8 +3,62 @@
 from __future__ import absolute_import, print_function, unicode_literals
 
 
+def _normalize_note(note, ctrl=None):
+    """Convert a note (tuple, list, or object) to a JSON-safe dict."""
+    if isinstance(note, (tuple, list)) and len(note) >= 5:
+        return {
+            "pitch": int(note[0]),
+            "start_time": float(note[1]),
+            "duration": float(note[2]),
+            "velocity": int(note[3]),
+            "mute": bool(note[4]),
+        }
+    if hasattr(note, "pitch"):
+        return {
+            "pitch": int(getattr(note, "pitch", 0)),
+            "start_time": float(getattr(note, "start_time", 0.0)),
+            "duration": float(getattr(note, "duration", 0.0)),
+            "velocity": int(getattr(note, "velocity", 100)),
+            "mute": bool(getattr(note, "mute", False)),
+        }
+    if isinstance(note, dict) and "pitch" in note:
+        return {
+            "pitch": int(note.get("pitch", 0)),
+            "start_time": float(note.get("start_time", 0.0)),
+            "duration": float(note.get("duration", 0.0)),
+            "velocity": int(note.get("velocity", 100)),
+            "mute": bool(note.get("mute", note.get("muted", False))),
+        }
+    return None
+
+
+def _get_raw_notes(clip, ctrl=None):
+    """Retrieve raw notes from clip with API fallback for Live version compatibility."""
+    if hasattr(clip, "get_all_notes_extended"):
+        raw = clip.get_all_notes_extended()
+    elif hasattr(clip, "get_all_notes"):
+        raw = clip.get_all_notes()
+    elif hasattr(clip, "get_notes_extended"):
+        raw = clip.get_notes_extended(
+            from_pitch=0, pitch_span=128, from_time=0, time_span=clip.length
+        )
+    else:
+        notes_data = clip.get_notes(0, 0, clip.length, 128)
+        raw = notes_data[0] if notes_data and len(notes_data) > 0 else []
+
+    if isinstance(raw, dict):
+        return raw.get("notes", [])
+    if isinstance(raw, (list, tuple)):
+        return list(raw)
+    return []
+
+
 def get_clip_notes(song, track_index, clip_index, ctrl=None):
-    """Read all MIDI notes from a clip (legacy format)."""
+    """Read all MIDI notes from a clip with metadata (quantization, scale, clip length).
+
+    Returns notes as JSON-safe dicts (pitch, start_time, duration, velocity, mute)
+    compatible with add_notes_to_clip for round-trip workflows.
+    """
     try:
         if track_index < 0 or track_index >= len(song.tracks):
             raise IndexError("Track index out of range")
@@ -15,68 +69,61 @@ def get_clip_notes(song, track_index, clip_index, ctrl=None):
         if not clip_slot.has_clip:
             raise Exception("No clip in slot")
         clip = clip_slot.clip
-        if clip.is_audio_clip:
+        if not clip.is_midi_clip:
             raise Exception("Clip is not a MIDI clip")
-        notes_data = clip.get_notes(0, 0, clip.length, 128)
+
+        raw_notes = _get_raw_notes(clip, ctrl)
         notes_list = []
-        if notes_data and len(notes_data) > 0:
-            notes_tuple = notes_data[0]
-            for note in notes_tuple:
-                note_dict = {
-                    "pitch": note[0],
-                    "start_time": note[1],
-                    "duration": note[2],
-                    "velocity": note[3],
-                    "muted": note[4] if len(note) > 4 else False,
-                }
-                notes_list.append(note_dict)
+        for note in raw_notes:
+            normalized = _normalize_note(note, ctrl)
+            if normalized is not None:
+                notes_list.append(normalized)
+
+        clip_length = float(clip.length)
+        quantization = getattr(clip, "launch_quantization", None)
+        if quantization is not None and not isinstance(quantization, (int, float, type(None))):
+            try:
+                quantization = int(quantization)
+            except (TypeError, ValueError):
+                quantization = None
+
+        scale_info = None
+        if hasattr(song, "scale_mode"):
+            scale_info = {
+                "enabled": bool(getattr(song, "scale_mode", False)),
+                "root_note": getattr(song, "root_note", None),
+                "scale_name": getattr(song, "scale_name", None),
+                "scale_intervals": list(getattr(song, "scale_intervals", []))
+                    if getattr(song, "scale_intervals", None) is not None else None,
+            }
+            scale_info = {k: v for k, v in scale_info.items() if v is not None or k == "enabled"}
+
         return {
             "clip_name": clip.name,
-            "clip_length": clip.length,
+            "clip_length": clip_length,
             "note_count": len(notes_list),
             "notes": notes_list,
+            "quantization": quantization,
+            "scale_info": scale_info,
         }
     except Exception as e:
         if ctrl:
-            ctrl.log_message("Error getting clip notes: " + str(e))
+            ctrl.log_message(
+                "Error getting clip notes (track=%s, clip=%s): %s"
+                % (track_index, clip_index, str(e))
+            )
         raise
 
 
 def get_notes_from_clip(song, track_index, clip_index, ctrl=None):
-    """Get all MIDI notes from a clip (extended format)."""
-    try:
-        if track_index < 0 or track_index >= len(song.tracks):
-            raise IndexError("Track index out of range")
-        track = song.tracks[track_index]
-        if clip_index < 0 or clip_index >= len(track.clip_slots):
-            raise IndexError("Clip index out of range")
-        clip_slot = track.clip_slots[clip_index]
-        if not clip_slot.has_clip:
-            raise Exception("No clip in slot")
-        clip = clip_slot.clip
-        notes_data = clip.get_notes_extended(
-            from_pitch=0, pitch_span=128, from_time=0, time_span=clip.length
-        )
-        notes = []
-        if notes_data:
-            for note in notes_data:
-                notes.append({
-                    "pitch": note.pitch,
-                    "start_time": note.start_time,
-                    "duration": note.duration,
-                    "velocity": note.velocity,
-                    "mute": note.mute,
-                })
-        return {
-            "clip_name": clip.name,
-            "clip_length": clip.length,
-            "note_count": len(notes),
-            "notes": notes,
-        }
-    except Exception as e:
-        if ctrl:
-            ctrl.log_message("Error getting notes from clip: " + str(e))
-        raise
+    """Get all MIDI notes from a clip (delegates to get_clip_notes for consistency)."""
+    result = get_clip_notes(song, track_index, clip_index, ctrl)
+    return {
+        "clip_name": result["clip_name"],
+        "clip_length": result["clip_length"],
+        "note_count": result["note_count"],
+        "notes": result["notes"],
+    }
 
 
 def quantize_clip(song, track_index, clip_index, quantize_to, ctrl=None):

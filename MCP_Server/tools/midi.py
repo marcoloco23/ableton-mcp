@@ -77,3 +77,33 @@ def register(mcp: Any, get_ableton_connection: Callable[[], Any]) -> None:
         except Exception as e:
             logger.error(f"Error writing grid to clip: {str(e)}")
             return f"Error writing grid to clip: {str(e)}"
+
+    @mcp.tool()
+    def parse_grid_preview(
+        ctx: Context,
+        grid: str,
+        is_drums: bool = None,
+        steps_per_beat: int = 4,
+    ) -> str:
+        """Preview parsed note events from ASCII grid without writing to Ableton."""
+        try:
+            from MCP_Server.grid_notation import parse_grid
+
+            notes = parse_grid(grid, is_drums=is_drums, steps_per_beat=steps_per_beat)
+            preview = {
+                "note_count": len(notes),
+                "steps_per_beat": steps_per_beat,
+                "is_drums": is_drums,
+                "notes_preview": notes[:32],
+            }
+            if notes:
+                end_time = max(
+                    n.get("start_time", 0.0) + n.get("duration", 0.0) for n in notes
+                )
+                preview["estimated_length_beats"] = end_time
+            return json.dumps(preview, indent=2)
+        except ImportError:
+            return "Error: grid_notation module not available"
+        except Exception as e:
+            logger.error(f"Error parsing grid preview: {str(e)}")
+            return f"Error parsing grid preview: {str(e)}"

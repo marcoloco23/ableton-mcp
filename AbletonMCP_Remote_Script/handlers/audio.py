@@ -62,6 +62,74 @@ def load_audio_sample(
         raise
 
 
+def get_all_clip_gains(song, track_indices=None, ctrl=None):
+    """Get clip gain for the first clip on each specified track."""
+    try:
+        if track_indices is None:
+            track_indices = list(range(len(song.tracks)))
+        results = []
+        for i in track_indices:
+            if i < 0 or i >= len(song.tracks):
+                continue
+            track = song.tracks[i]
+            for slot_index, slot in enumerate(track.clip_slots):
+                if slot.has_clip:
+                    clip = slot.clip
+                    if clip.is_audio_clip:
+                        gain_val = getattr(clip, "gain", None)
+                        gain_db = None
+                        try:
+                            gain_db = clip.gain_display_string
+                        except Exception:
+                            pass
+                        results.append({
+                            "track_index": i,
+                            "track_name": track.name,
+                            "clip_index": slot_index,
+                            "clip_name": clip.name,
+                            "gain": gain_val,
+                            "gain_display": gain_db,
+                        })
+                    break  # only first clip per track
+        return {"clips": results, "count": len(results)}
+    except Exception as e:
+        if ctrl:
+            ctrl.log_message("Error getting clip gains: " + str(e))
+        raise
+
+
+def set_clip_gain(song, track_index, clip_index, gain, ctrl=None):
+    """Set clip gain. gain is the raw API value (0.0-1.0)."""
+    try:
+        if track_index < 0 or track_index >= len(song.tracks):
+            raise IndexError("Track index out of range")
+        track = song.tracks[track_index]
+        if clip_index < 0 or clip_index >= len(track.clip_slots):
+            raise IndexError("Clip index out of range")
+        clip_slot = track.clip_slots[clip_index]
+        if not clip_slot.has_clip:
+            raise Exception("No clip in slot")
+        clip = clip_slot.clip
+        if not clip.is_audio_clip:
+            raise Exception("Clip is not an audio clip")
+        clip.gain = float(gain)
+        gain_db = None
+        try:
+            gain_db = clip.gain_display_string
+        except Exception:
+            pass
+        return {
+            "track_index": track_index,
+            "clip_index": clip_index,
+            "gain": clip.gain,
+            "gain_display": gain_db,
+        }
+    except Exception as e:
+        if ctrl:
+            ctrl.log_message("Error setting clip gain: " + str(e))
+        raise
+
+
 def get_audio_clip_info(song, track_index, clip_index, ctrl=None):
     """Get information about an audio clip."""
     try:

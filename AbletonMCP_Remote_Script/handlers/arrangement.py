@@ -78,3 +78,122 @@ def get_arrangement_clips(song, track_index, ctrl=None):
         if ctrl:
             ctrl.log_message("Error getting arrangement clips: " + str(e))
         raise
+
+
+def inspect_arrangement_clip(song, track_index, arrangement_clip_index, ctrl=None):
+    """Inspect available attributes/methods on an arrangement clip for debugging."""
+    try:
+        if track_index < 0 or track_index >= len(song.tracks):
+            raise IndexError("Track index out of range")
+        track = song.tracks[track_index]
+
+        # If arrangement_clip_index == -1, inspect the clip slot instead
+        if arrangement_clip_index == -1:
+            slot = track.clip_slots[0]
+            attrs = []
+            for attr in dir(slot):
+                if attr.startswith("_"):
+                    continue
+                try:
+                    val = getattr(slot, attr)
+                    if callable(val):
+                        attrs.append({"name": attr, "type": "method"})
+                    else:
+                        attrs.append({"name": attr, "type": "property", "value": str(val)[:100]})
+                except Exception:
+                    attrs.append({"name": attr, "type": "inaccessible"})
+            return {"object": "ClipSlot", "attributes": attrs}
+
+        arr_clips = list(track.arrangement_clips)
+        if arrangement_clip_index < 0 or arrangement_clip_index >= len(arr_clips):
+            raise IndexError("Arrangement clip index out of range")
+        clip = arr_clips[arrangement_clip_index]
+
+        attrs = []
+        for attr in dir(clip):
+            if attr.startswith("_"):
+                continue
+            try:
+                val = getattr(clip, attr)
+                if callable(val):
+                    attrs.append({"name": attr, "type": "method"})
+                else:
+                    attrs.append({"name": attr, "type": "property", "value": str(val)[:100]})
+            except Exception:
+                attrs.append({"name": attr, "type": "inaccessible"})
+
+        return {
+            "track_index": track_index,
+            "clip_name": clip.name,
+            "attributes": attrs,
+        }
+    except Exception as e:
+        if ctrl:
+            ctrl.log_message("Error inspecting clip: " + str(e))
+        raise
+
+
+def copy_arrangement_to_session(song, track_index, arrangement_clip_index, clip_slot_index, ctrl=None):
+    """Copy an arrangement clip into a session clip slot.
+
+    Uses create_audio_clip on the target slot with the arrangement clip's file_path.
+    """
+    try:
+        if track_index < 0 or track_index >= len(song.tracks):
+            raise IndexError("Track index out of range")
+        track = song.tracks[track_index]
+
+        if not hasattr(track, "arrangement_clips"):
+            raise Exception("Track has no arrangement clips")
+
+        arr_clips = list(track.arrangement_clips)
+        if arrangement_clip_index < 0 or arrangement_clip_index >= len(arr_clips):
+            raise IndexError(
+                "Arrangement clip index %d out of range (track has %d)"
+                % (arrangement_clip_index, len(arr_clips))
+            )
+
+        if clip_slot_index < 0 or clip_slot_index >= len(track.clip_slots):
+            raise IndexError("Clip slot index out of range")
+
+        src = arr_clips[arrangement_clip_index]
+        target_slot = track.clip_slots[clip_slot_index]
+
+        if target_slot.has_clip:
+            raise Exception("Target clip slot already has a clip")
+
+        if not src.is_audio_clip:
+            raise Exception("Only audio clips supported")
+
+        file_path = src.file_path
+        if not file_path:
+            raise Exception("Arrangement audio clip has no file_path")
+
+        # Create audio clip in session slot from the same file
+        target_slot.create_audio_clip(file_path)
+
+        # Copy properties from arrangement clip
+        if target_slot.has_clip:
+            new_clip = target_slot.clip
+            new_clip.name = src.name
+            new_clip.looping = True
+            new_clip.loop_start = src.loop_start
+            new_clip.loop_end = src.loop_end
+            new_clip.warping = src.warping
+            if hasattr(src, "warp_mode"):
+                new_clip.warp_mode = src.warp_mode
+            if hasattr(src, "gain"):
+                new_clip.gain = src.gain
+
+        return {
+            "copied": True,
+            "track_index": track_index,
+            "clip_slot_index": clip_slot_index,
+            "clip_name": src.name,
+            "file_path": file_path,
+        }
+
+    except Exception as e:
+        if ctrl:
+            ctrl.log_message("Error copying arrangement to session: " + str(e))
+        raise

@@ -255,6 +255,56 @@ def delete_chain_device(song, track_index, device_index, chain_index, chain_devi
         raise
 
 
+def _serialize_device(device, ctrl=None, max_depth=10, _depth=0):
+    """Serialize a device, recursively including chains for rack devices.
+
+    Stops recursing past max_depth to avoid RecursionError on deeply nested racks.
+    """
+    device_info = {
+        "name": device.name,
+        "class_name": device.class_name,
+        "type": get_device_type(device, ctrl),
+    }
+    if (
+        getattr(device, "can_have_chains", False)
+        and _depth < max_depth
+    ):
+        chains = []
+        for chain_index, chain in enumerate(device.chains):
+            chain_devices = []
+            for dev_index, dev in enumerate(chain.devices):
+                cd = _serialize_device(dev, ctrl, max_depth, _depth + 1)
+                cd["index"] = dev_index
+                chain_devices.append(cd)
+            chains.append({
+                "index": chain_index,
+                "name": chain.name,
+                "devices": chain_devices,
+            })
+        device_info["chains"] = chains
+    return device_info
+
+
+def get_rack_device_info(song, track_index, device_index, track_type="track", ctrl=None):
+    """Get detailed information about a rack device's chains and nested devices."""
+    try:
+        track = resolve_track(song, track_index, track_type)
+        device_list = list(track.devices)
+        if device_index < 0 or device_index >= len(device_list):
+            raise ValueError("Device index out of range")
+        device = device_list[device_index]
+        if not getattr(device, "can_have_chains", False):
+            raise ValueError("Device at index %s is not a rack" % device_index)
+        return _serialize_device(device, ctrl)
+    except Exception as e:
+        if ctrl:
+            ctrl.log_message(
+                "Error getting rack device info (track=%s, device=%s): %s"
+                % (track_index, device_index, str(e))
+            )
+        raise
+
+
 def get_macro_values(song, track_index, device_index, ctrl=None):
     """Get the values of all 8 macro controls on a rack device."""
     try:

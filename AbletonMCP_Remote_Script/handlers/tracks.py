@@ -28,12 +28,22 @@ def get_track_info(song, track_index, ctrl=None):
         from . import devices as dev_mod
         devices_list = []
         for device_index, device in enumerate(track.devices):
-            devices_list.append({
+            dev_info = {
                 "index": device_index,
                 "name": device.name,
                 "class_name": device.class_name,
                 "type": dev_mod.get_device_type(device, ctrl),
-            })
+            }
+            if getattr(device, "can_have_chains", False):
+                chains = []
+                for chain_index, chain in enumerate(device.chains):
+                    chains.append({
+                        "index": chain_index,
+                        "name": chain.name,
+                        "device_count": len(chain.devices),
+                    })
+                dev_info["chains"] = chains
+            devices_list.append(dev_info)
         result = {
             "index": track_index,
             "name": track.name,
@@ -271,6 +281,314 @@ def set_return_track_name(song, return_index, name, ctrl=None):
     except Exception as e:
         if ctrl:
             ctrl.log_message("Error setting return track name: " + str(e))
+        raise
+
+
+def _get_volume_db(track):
+    """Get the fader dB string from Ableton's own conversion."""
+    try:
+        vol_param = track.mixer_device.volume
+        # Try str_for_value if available (returns e.g. "-6.0 dB")
+        try:
+            return vol_param.str_for_value(vol_param.value)
+        except Exception:
+            pass
+        # Fallback: try __str__
+        try:
+            s = str(vol_param)
+            if "dB" in s or "-" in s:
+                return s
+        except Exception:
+            pass
+    except Exception:
+        pass
+    return None
+
+
+def get_track_meters(song, track_indices=None, include_returns=False, include_master=False, ctrl=None):
+    """Read output meters and fader values for tracks.
+
+    Returns pre-fader meter levels (0.0-1.0) plus fader value and dB string
+    so the caller can compute post-fader levels.
+    """
+    try:
+        results = []
+        if track_indices is None:
+            track_indices = list(range(len(song.tracks)))
+        for i in track_indices:
+            if i < 0 or i >= len(song.tracks):
+                continue
+            track = song.tracks[i]
+            vol = track.mixer_device.volume
+            results.append({
+                "index": i,
+                "name": track.name,
+                "type": "track",
+                "left": track.output_meter_left,
+                "right": track.output_meter_right,
+                "volume": vol.value,
+                "volume_min": vol.min,
+                "volume_max": vol.max,
+                "volume_db": _get_volume_db(track),
+                "mute": track.mute,
+            })
+        if include_returns:
+            for i, track in enumerate(song.return_tracks):
+                vol = track.mixer_device.volume
+                results.append({
+                    "index": i,
+                    "name": track.name,
+                    "type": "return",
+                    "left": track.output_meter_left,
+                    "right": track.output_meter_right,
+                    "volume": vol.value,
+                    "volume_min": vol.min,
+                    "volume_max": vol.max,
+                    "volume_db": _get_volume_db(track),
+                    "mute": track.mute,
+                })
+        if include_master:
+            master = song.master_track
+            vol = master.mixer_device.volume
+            results.append({
+                "index": 0,
+                "name": "Master",
+                "type": "master",
+                "left": master.output_meter_left,
+                "right": master.output_meter_right,
+                "volume": vol.value,
+                "volume_min": vol.min,
+                "volume_max": vol.max,
+                "volume_db": _get_volume_db(master),
+            })
+        return {"meters": results, "count": len(results)}
+    except Exception as e:
+        if ctrl:
+            ctrl.log_message("Error getting track meters: " + str(e))
+        raise
+
+
+def get_group_structure(song, ctrl=None):
+    """Get group/folder structure for all tracks.
+
+    Returns is_foldable, is_grouped, group_track info so callers can
+    understand the nesting hierarchy.
+    """
+    try:
+        results = []
+        for i, track in enumerate(song.tracks):
+            info = {
+                "index": i,
+                "name": track.name,
+                "is_foldable": False,
+                "is_grouped": False,
+                "group_track_index": None,
+                "group_track_name": None,
+            }
+            try:
+                info["is_foldable"] = track.is_foldable
+            except Exception:
+                pass
+            try:
+                info["is_grouped"] = track.is_grouped
+            except Exception:
+                pass
+            try:
+                if track.is_grouped and track.group_track:
+                    gt = track.group_track
+                    # Find index of group track
+                    for j, t in enumerate(song.tracks):
+                        if t == gt:
+                            info["group_track_index"] = j
+                            info["group_track_name"] = gt.name
+                            break
+            except Exception:
+                pass
+            results.append(info)
+        return {"tracks": results, "count": len(results)}
+    except Exception as e:
+        if ctrl:
+            ctrl.log_message("Error getting group structure: " + str(e))
+        raise
+
+
+def relocate_track(song, source_index, target_index, device_uris=None, ctrl=None):
+    """Relocate a track by recreating it at a new position.
+
+    Creates a new track at target_index, loads devices from URIs,
+    copies properties (name, color, volume, pan, mute), then deletes
+    the source track.
+
+    Args:
+        source_index: Index of track to move.
+        target_index: Where to create the new track (within a group = inside it).
+        device_uris: List of browser URIs to load on the new track, in order.
+    """
+    try:
+        if source_index < 0 or source_index >= len(song.tracks):
+            raise IndexError("Source track index out of range")
+
+        src = song.tracks[source_index]
+
+        # Capture properties
+        name = src.name
+        color = src.color_index
+        vol = src.mixer_device.volume.value
+        pan = src.mixer_device.panning.value
+        mute = src.mute
+        solo = src.solo
+        is_midi = src.has_midi_input
+
+        # Create new track at target position
+        if is_midi:
+            song.create_midi_track(target_index)
+        else:
+            song.create_audio_track(target_index)
+
+        # Adjust source index if target was before it
+        actual_source = source_index
+        if target_index <= source_index:
+            actual_source = source_index + 1
+
+        new_track = song.tracks[target_index]
+
+        # Set properties
+        new_track.name = name
+        new_track.color_index = color
+        new_track.mixer_device.volume.value = vol
+        new_track.mixer_device.panning.value = pan
+        new_track.mute = mute
+        if solo:
+            new_track.solo = True
+
+        # Load devices from URIs
+        loaded_devices = []
+        if device_uris and ctrl:
+            from . import browser as br
+            app = ctrl.application()
+            for uri in device_uris:
+                try:
+                    item = br.find_browser_item_by_uri(app.browser, uri, ctrl=ctrl)
+                    if item:
+                        song.view.selected_track = new_track
+                        app.browser.load_item(item)
+                        loaded_devices.append(uri)
+                    else:
+                        loaded_devices.append("NOT_FOUND:" + uri)
+                except Exception as load_err:
+                    loaded_devices.append("ERROR:" + str(load_err))
+                    if ctrl:
+                        ctrl.log_message("Error loading URI {0}: {1}".format(uri, str(load_err)))
+
+        # Delete old track
+        song.delete_track(actual_source)
+
+        # Figure out final index (deletion may shift)
+        final_index = target_index
+        if actual_source < target_index:
+            final_index = target_index - 1
+
+        return {
+            "relocated": True,
+            "name": name,
+            "from_index": source_index,
+            "to_index": final_index,
+            "loaded_devices": loaded_devices,
+        }
+    except Exception as e:
+        if ctrl:
+            ctrl.log_message("Error relocating track: " + str(e))
+        raise
+
+
+def move_to_group(song, track_name=None, track_index=None,
+                   group_name=None, position="last", device_uris=None, ctrl=None):
+    """Move a track into a group by name, handling index math internally.
+
+    Args:
+        track_name: Name of track to move (used if track_index not given).
+        track_index: Index of track to move (takes priority over name).
+        group_name: Name of the destination group bus.
+        position: Where in the group: "first", "last", or "before:TRACK_NAME"
+                  or "after:TRACK_NAME".
+        device_uris: List of browser URIs to load on the new track.
+    """
+    try:
+        tracks = list(song.tracks)
+
+        # Resolve source track
+        src_idx = track_index
+        if src_idx is None:
+            for i, t in enumerate(tracks):
+                if t.name == track_name:
+                    src_idx = i
+                    break
+            if src_idx is None:
+                raise ValueError("Track not found: " + str(track_name))
+
+        # Resolve group
+        group_idx = None
+        for i, t in enumerate(tracks):
+            if t.name == group_name:
+                try:
+                    if t.is_foldable:
+                        group_idx = i
+                        break
+                except Exception:
+                    pass
+        if group_idx is None:
+            raise ValueError("Group not found: " + str(group_name))
+
+        # Find group members (tracks whose group_track == group track)
+        group_track = tracks[group_idx]
+        members = []
+        for i, t in enumerate(tracks):
+            if i == group_idx:
+                continue
+            try:
+                if t.is_grouped and t.group_track == group_track:
+                    members.append(i)
+            except Exception:
+                pass
+
+        if not members:
+            # Empty group — insert right after the bus
+            target = group_idx + 1
+        elif position == "first":
+            target = members[0]
+        elif position == "last":
+            target = members[-1]
+        elif position.startswith("before:"):
+            ref_name = position[7:]
+            target = None
+            for m in members:
+                if tracks[m].name == ref_name:
+                    target = m
+                    break
+            if target is None:
+                raise ValueError("Reference track not found in group: " + ref_name)
+        elif position.startswith("after:"):
+            ref_name = position[6:]
+            target = None
+            for m in members:
+                if tracks[m].name == ref_name:
+                    # Insert at this position pushes ref track down,
+                    # but we want AFTER, so use the next member or last
+                    ref_pos = m
+                    target = ref_pos + 1
+                    # Check if target is still inside the group
+                    if target > members[-1]:
+                        target = members[-1]
+                    break
+            if target is None:
+                raise ValueError("Reference track not found in group: " + ref_name)
+        else:
+            target = members[-1]
+
+        return relocate_track(song, src_idx, target, device_uris, ctrl)
+    except Exception as e:
+        if ctrl:
+            ctrl.log_message("Error in move_to_group: " + str(e))
         raise
 
 

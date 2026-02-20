@@ -209,3 +209,81 @@ def tap_tempo(song, ctrl=None):
         if ctrl:
             ctrl.log_message("Error tapping tempo: " + str(e))
         raise
+
+
+def switch_to_view(song, view_name, ctrl=None):
+    """Switch Ableton UI focus between Session and Arrangement views."""
+    try:
+        if not ctrl:
+            raise Exception("Control surface context is required for view switching")
+        if not view_name:
+            raise ValueError("view_name is required")
+
+        normalized = str(view_name).strip().lower()
+        view_map = {
+            "session": "Session",
+            "sessionview": "Session",
+            "arrangement": "Arranger",
+            "arranger": "Arranger",
+            "arrangementview": "Arranger",
+        }
+        target = view_map.get(normalized)
+        if not target:
+            raise ValueError("view_name must be 'session' or 'arrangement'")
+
+        app_view = ctrl.application().view
+        app_view.show_view(target)
+        app_view.focus_view(target)
+        return {"view": target}
+    except Exception as e:
+        if ctrl:
+            ctrl.log_message("Error switching view: " + str(e))
+        raise
+
+
+def record_arrangement_clip(song, track_index, clip_index, start_time=0.0, ctrl=None):
+    """Start arrangement recording and launch a session clip at a target time.
+
+    This starts recording and playback, launches the requested clip, and leaves
+    transport running so callers can decide when to stop recording.
+    """
+    try:
+        if track_index < 0 or track_index >= len(song.tracks):
+            raise IndexError("Track index out of range")
+        track = song.tracks[track_index]
+        if clip_index < 0 or clip_index >= len(track.clip_slots):
+            raise IndexError("Clip index out of range")
+        clip_slot = track.clip_slots[clip_index]
+        if not clip_slot.has_clip:
+            raise Exception("No clip in slot")
+
+        if ctrl:
+            try:
+                app_view = ctrl.application().view
+                app_view.show_view("Arranger")
+                app_view.focus_view("Arranger")
+            except Exception:
+                pass
+
+        if getattr(track, "can_be_armed", False):
+            track.arm = True
+        song.current_song_time = max(0.0, float(start_time))
+        song.arrangement_overdub = True
+        song.record_mode = True
+        if not song.is_playing:
+            song.start_playing()
+        clip_slot.fire()
+
+        return {
+            "recording": song.record_mode,
+            "playing": song.is_playing,
+            "arrangement_overdub": song.arrangement_overdub,
+            "track_index": track_index,
+            "clip_index": clip_index,
+            "start_time": song.current_song_time,
+            "note": "Recording started. Call stop_arrangement_recording to end capture.",
+        }
+    except Exception as e:
+        if ctrl:
+            ctrl.log_message("Error recording arrangement clip: " + str(e))
+        raise
