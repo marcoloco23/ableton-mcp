@@ -135,6 +135,437 @@ def _move_device(song, p, ctrl):
     }
 
 
+def _get_project_overview(song, p, ctrl):
+    """Single-call project overview: session, tracks, groups, arrangement clips."""
+    try:
+        # 1. Session info
+        session = {
+            "tempo": song.tempo,
+            "time_signature": "{0}/{1}".format(
+                song.signature_numerator, song.signature_denominator
+            ),
+            "track_count": len(song.tracks),
+            "return_track_count": len(song.return_tracks),
+        }
+
+        # 2. All tracks — compact summary with arrangement clip info
+        track_list = []
+        for i, track in enumerate(song.tracks):
+            # Basic track info
+            info = {
+                "index": i,
+                "name": track.name,
+                "type": "audio" if track.has_audio_input else "midi",
+                "mute": track.mute,
+                "volume": round(track.mixer_device.volume.value, 4),
+                "pan": round(track.mixer_device.panning.value, 2),
+            }
+
+            # Group membership
+            try:
+                info["is_group"] = track.is_foldable
+            except Exception:
+                info["is_group"] = False
+            try:
+                if track.is_grouped and track.group_track:
+                    info["group"] = track.group_track.name
+            except Exception:
+                pass
+
+            # Devices — names only
+            info["devices"] = [d.name for d in track.devices]
+
+            # Session clips — just count and names
+            session_clips = []
+            for slot in track.clip_slots:
+                if slot.has_clip:
+                    session_clips.append(slot.clip.name)
+            if session_clips:
+                info["session_clips"] = session_clips
+
+            # Arrangement clips — compact summary
+            arr_clips = []
+            try:
+                if hasattr(track, "arrangement_clips"):
+                    for clip in track.arrangement_clips:
+                        arr_clips.append({
+                            "name": clip.name,
+                            "start": clip.start_time,
+                            "end": clip.end_time,
+                            "muted": getattr(clip, "muted", False),
+                            "is_audio": clip.is_audio_clip,
+                        })
+            except Exception:
+                pass
+            if arr_clips:
+                info["arrangement_clips"] = arr_clips
+
+            track_list.append(info)
+
+        # 3. Return tracks
+        returns = []
+        for i, rt in enumerate(song.return_tracks):
+            returns.append({
+                "index": i,
+                "name": rt.name,
+                "devices": [d.name for d in rt.devices],
+            })
+
+        # 4. Master
+        master = {
+            "volume": round(song.master_track.mixer_device.volume.value, 4),
+            "devices": [d.name for d in song.master_track.devices],
+        }
+
+        return {
+            "session": session,
+            "tracks": track_list,
+            "return_tracks": returns,
+            "master": master,
+        }
+    except Exception as e:
+        if ctrl:
+            ctrl.log_message("Error in get_project_overview: " + str(e))
+        raise
+
+
+
+def _record_arrangement(song, p, ctrl):
+    """Record session scenes to arrangement automatically.
+
+    Fires scenes at the right times based on the plan, recording
+    everything to arrangement view.
+
+    Params:
+        plan: list of sections (same format as build_arrangement)
+        stop_after: bool (default True) - stop recording after last section
+    """
+    plan = p.get("plan", [])
+    stop_after = p.get("stop_after", True)
+
+    if not plan:
+        return {"error": "no plan provided"}
+
+    # Build scene fire times (in beats)
+    scene_times = []
+    total_beats = 0
+    for i, s in enumerate(plan):
+        beat = (s["bar"] - 1) * 4
+        scene_times.append({"scene": i, "beat": beat, "name": s["name"]})
+        end = beat + s["bars"] * 4
+        if end > total_beats:
+            total_beats = end
+
+    next_scene = [1]  # index into scene_times; scene 0 fires immediately
+
+    def poll_and_fire():
+        idx = next_scene[0]
+
+        # Check if we're past the end
+        if song.current_song_time >= total_beats:
+            if stop_after:
+                song.record_mode = False
+                song.stop_playing()
+            if ctrl:
+                ctrl.log_message("record_arrangement: done at {0}".format(
+                    song.current_song_time))
+            return
+
+        # Fire next scene 2 beats early — global quantization (1 bar)
+        # will snap the actual launch to the correct bar line.
+        if idx < len(scene_times):
+            target = scene_times[idx]["beat"]
+            if song.current_song_time >= target - 2.0:
+                song.scenes[scene_times[idx]["scene"]].fire()
+                if ctrl:
+                    ctrl.log_message("record_arrangement: fired {0} at {1}".format(
+                        scene_times[idx]["name"], song.current_song_time))
+                next_scene[0] += 1
+
+        # Poll again (~100ms per tick)
+        ctrl.schedule_message(1, poll_and_fire)
+
+    # Setup: position at start, quantize to 1 bar, enable record, fire scene 0
+    song.stop_playing()
+    song.current_song_time = 0.0
+    song.clip_trigger_quantization = 4  # 4 = 1 Bar
+    song.record_mode = True
+    song.scenes[0].fire()
+    if ctrl:
+        ctrl.log_message("record_arrangement: started, {0} scenes".format(
+            len(scene_times)))
+
+    # Start polling for subsequent scenes
+    ctrl.schedule_message(1, poll_and_fire)
+
+    return {
+        "status": "recording_started",
+        "total_scenes": len(scene_times),
+        "total_beats": total_beats,
+        "total_bars": total_beats / 4,
+        "duration_seconds": total_beats * 60.0 / song.tempo,
+    }
+
+
+def _manage_locators(song, p, ctrl):
+    """List, delete, or replace all locators/cue_points.
+
+    Actions:
+        list: return all locators
+        delete_all: remove all locators
+        replace_all: delete all, then create from 'locators' list
+            locators: [{"position": float, "name": str}, ...]
+    """
+    action = p.get("action", "list")
+    cue_points = list(song.cue_points)
+
+    if action == "list":
+        return [{"name": cp.name, "time": cp.time} for cp in cue_points]
+
+    original_time = song.current_song_time
+
+    if action in ("delete_all", "replace_all"):
+        # Delete all existing
+        times = [cp.time for cp in cue_points]
+        for t in times:
+            song.current_song_time = t
+            song.set_or_delete_cue()
+        deleted = len(times)
+
+        if action == "delete_all":
+            song.current_song_time = original_time
+            return {"deleted": deleted}
+
+        # Create new locators
+        locators = p.get("locators", [])
+        created = []
+        for loc in locators:
+            pos = float(loc["position"])
+            name = str(loc.get("name", ""))
+            song.current_song_time = pos
+            song.set_or_delete_cue()
+            # Find the cue we just created and name it
+            best_cue = None
+            best_dist = 999999.0
+            for cp in song.cue_points:
+                dist = abs(cp.time - pos)
+                if dist < best_dist:
+                    best_dist = dist
+                    best_cue = cp
+            if best_cue and name:
+                best_cue.name = name
+                created.append({"name": name, "position": best_cue.time})
+            elif best_cue:
+                created.append({"name": best_cue.name, "position": best_cue.time})
+
+        song.current_song_time = original_time
+        return {"deleted": deleted, "created": created}
+
+    return {"error": "unknown action"}
+
+
+def _build_arrangement(song, p, ctrl):
+    """Build arrangement as session scenes.
+
+    Creates session clips from arrangement sources and duplicates them
+    into scene slots matching the section plan. Clips are auto-named
+    to match their track name. User then launches scenes to record.
+
+    Params:
+        plan: list of sections:
+            {"name": str, "bar": int (1-indexed), "bars": int,
+             "tracks": [int, ...] (track indices that should be ACTIVE)}
+        source_bars: int (current loop length, auto-detected if omitted)
+    """
+    plan = p.get("plan", [])
+    source_bars = p.get("source_bars", None)
+
+    # Auto-detect source_bars from arrangement clips if not provided
+    if source_bars is None:
+        max_end = 0
+        for track in song.tracks:
+            try:
+                for clip in track.arrangement_clips:
+                    if clip.end_time > max_end:
+                        max_end = clip.end_time
+            except Exception:
+                continue
+        source_bars = max(int(max_end / 4), 16)
+        if ctrl:
+            ctrl.log_message("build_arrangement: auto-detected {0} source bars".format(
+                source_bars))
+
+    source_beats = source_bars * 4
+
+    if ctrl:
+        ctrl.log_message("build_arrangement: {0} sections".format(len(plan)))
+
+    # Collect source clips per track from arrangement
+    track_data = {}
+    for i, track in enumerate(song.tracks):
+        try:
+            arr_clips = track.arrangement_clips
+            if not arr_clips:
+                continue
+            source = [c for c in arr_clips if c.start_time < source_beats]
+            if source:
+                track_data[i] = source
+        except Exception:
+            continue
+
+    # Ensure enough scenes exist
+    while len(song.scenes) < len(plan):
+        song.create_scene(-1)
+
+    # Name scenes
+    for si, section in enumerate(plan):
+        try:
+            song.scenes[si].name = section["name"]
+        except Exception:
+            pass
+
+    # Build track sets per section
+    section_tracks = []
+    for s in plan:
+        section_tracks.append(set(s.get("tracks", [])))
+
+    # For each track, create source clip in slot 0 then dup to active scenes
+    clips_created = 0
+    skipped = []
+    errors = []
+
+    for tidx, source_clips in track_data.items():
+        track = song.tracks[tidx]
+        first = source_clips[0]
+        slot0 = track.clip_slots[0]
+
+        # Create session clip from first arrangement source
+        try:
+            if slot0.has_clip:
+                slot0.delete_clip()
+
+            if first.is_audio_clip:
+                fp = first.file_path
+                if not fp:
+                    skipped.append({"index": tidx, "name": track.name,
+                                    "reason": "no_file_path"})
+                    continue
+                slot0.create_audio_clip(fp)
+                if not slot0.has_clip:
+                    skipped.append({"index": tidx, "name": track.name,
+                                    "reason": "audio_create_failed"})
+                    continue
+                sc = slot0.clip
+                sc.looping = first.looping
+                sc.loop_start = first.loop_start
+                sc.loop_end = first.loop_end
+                sc.warping = first.warping
+                try:
+                    sc.warp_mode = first.warp_mode
+                except Exception:
+                    pass
+
+            elif first.is_midi_clip:
+                loop_len = first.loop_end - first.loop_start
+                if loop_len <= 0:
+                    loop_len = first.length
+                slot0.create_clip(loop_len)
+                if not slot0.has_clip:
+                    skipped.append({"index": tidx, "name": track.name,
+                                    "reason": "midi_create_failed"})
+                    continue
+                sc = slot0.clip
+                try:
+                    notes = list(first.get_all_notes_extended())
+                    if notes:
+                        live_notes = tuple(
+                            (int(n.pitch),
+                             float(n.start_time),
+                             float(n.duration),
+                             int(round(n.velocity)),
+                             bool(n.mute))
+                            for n in notes
+                        )
+                        sc.set_notes(live_notes)
+                except Exception as e:
+                    if ctrl:
+                        ctrl.log_message(
+                            "  MIDI note copy fail {0}: {1}".format(tidx, e))
+                    errors.append("MIDI {0}: {1}".format(tidx, str(e)))
+                sc.looping = True
+                sc.loop_start = first.loop_start
+                sc.loop_end = first.loop_end
+            else:
+                continue
+        except Exception as e:
+            errors.append("Track {0} setup: {1}".format(tidx, str(e)))
+            continue
+
+        if not slot0.has_clip:
+            continue
+
+        # Name the source clip to match track name
+        try:
+            slot0.clip.name = track.name
+        except Exception:
+            pass
+
+        # Duplicate to each active scene slot
+        for si, st in enumerate(section_tracks):
+            if tidx not in st:
+                continue
+            if si == 0:
+                # Slot 0 already has the clip
+                clips_created += 1
+                continue
+            target_slot = track.clip_slots[si]
+            try:
+                if target_slot.has_clip:
+                    target_slot.delete_clip()
+                slot0.duplicate_clip_to(target_slot)
+                # Name duplicated clip to match track
+                try:
+                    target_slot.clip.name = track.name
+                except Exception:
+                    pass
+                clips_created += 1
+            except Exception as e:
+                errors.append("Dup {0}->scene{1}: {2}".format(tidx, si, e))
+
+        # If track NOT active in scene 0, remove clip from slot 0
+        if tidx not in section_tracks[0]:
+            try:
+                slot0.delete_clip()
+            except Exception:
+                pass
+
+        if ctrl:
+            ctrl.log_message("  [{0}] {1}: done".format(tidx, track.name))
+
+    if ctrl:
+        ctrl.log_message("build done: {0} clips".format(clips_created))
+
+    # Scene summary
+    scene_summary = []
+    for si, section in enumerate(plan):
+        scene_summary.append({
+            "scene": si,
+            "name": section["name"],
+            "bars": section["bars"],
+            "track_count": len(section.get("tracks", [])),
+        })
+
+    return {
+        "scenes_created": len(plan),
+        "tracks_processed": len(track_data) - len(skipped),
+        "clips_placed": clips_created,
+        "source_bars": source_bars,
+        "scenes": scene_summary,
+        "skipped": skipped,
+        "errors": errors[:20],
+    }
+
+
 # Registry of dynamically dispatched commands.
 # Key: command name, Value: (handler_func, param_extractor, needs_main_thread)
 def _get_registry():
@@ -233,6 +664,22 @@ def _get_registry():
         },
         "set_track_routing": {
             "handler": lambda song, p, ctrl: _set_track_routing(song, p, ctrl),
+            "modifying": True,
+        },
+        "get_project_overview": {
+            "handler": lambda song, p, ctrl: _get_project_overview(song, p, ctrl),
+            "modifying": False,
+        },
+        "build_arrangement": {
+            "handler": lambda song, p, ctrl: _build_arrangement(song, p, ctrl),
+            "modifying": True,
+        },
+        "manage_locators": {
+            "handler": lambda song, p, ctrl: _manage_locators(song, p, ctrl),
+            "modifying": True,
+        },
+        "record_arrangement": {
+            "handler": lambda song, p, ctrl: _record_arrangement(song, p, ctrl),
             "modifying": True,
         },
     }
