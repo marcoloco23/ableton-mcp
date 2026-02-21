@@ -231,16 +231,24 @@ def _get_project_overview(song, p, ctrl):
 
 
 def _record_arrangement(song, p, ctrl):
-    """Record session scenes to arrangement automatically.
+    """Record session scenes to arrangement with live automation.
 
     Fires scenes at the right times based on the plan, recording
-    everything to arrangement view.
+    everything to arrangement view. Also applies parameter automation
+    in real-time during recording so it gets captured as arrangement
+    automation.
 
     Params:
         plan: list of sections (same format as build_arrangement)
+        automation: list of automation lanes:
+            {"track_index": int, "parameter_name": str,
+             "points": [{"time": float (beats), "value": float (0-1)}, ...]}
         stop_after: bool (default True) - stop recording after last section
     """
+    from . import automation as _auto
+
     plan = p.get("plan", [])
+    auto_lanes = p.get("automation", [])
     stop_after = p.get("stop_after", True)
 
     if not plan:
@@ -256,31 +264,80 @@ def _record_arrangement(song, p, ctrl):
         if end > total_beats:
             total_beats = end
 
+    # Resolve automation parameters and sort points by time
+    auto_resolved = []
+    for lane in auto_lanes:
+        try:
+            tidx = lane["track_index"]
+            track = song.tracks[tidx]
+            param = _auto._find_parameter(track, lane["parameter_name"])
+            if param is None:
+                if ctrl:
+                    ctrl.log_message("record: param not found: {0} on track {1}".format(
+                        lane["parameter_name"], tidx))
+                continue
+            pts = sorted(lane["points"], key=lambda x: float(x["time"]))
+            auto_resolved.append({"param": param, "points": pts, "next": [0],
+                                  "name": lane["parameter_name"], "track": tidx})
+        except Exception as e:
+            if ctrl:
+                ctrl.log_message("record: auto resolve error: {0}".format(e))
+
     next_scene = [1]  # index into scene_times; scene 0 fires immediately
 
     def poll_and_fire():
         idx = next_scene[0]
+        now = song.current_song_time
 
         # Check if we're past the end
-        if song.current_song_time >= total_beats:
+        if now >= total_beats:
             if stop_after:
                 song.record_mode = False
                 song.stop_playing()
             if ctrl:
-                ctrl.log_message("record_arrangement: done at {0}".format(
-                    song.current_song_time))
+                ctrl.log_message("record_arrangement: done at {0}".format(now))
             return
 
         # Fire next scene 2 beats early — global quantization (1 bar)
         # will snap the actual launch to the correct bar line.
         if idx < len(scene_times):
             target = scene_times[idx]["beat"]
-            if song.current_song_time >= target - 2.0:
+            if now >= target - 2.0:
                 song.scenes[scene_times[idx]["scene"]].fire()
                 if ctrl:
-                    ctrl.log_message("record_arrangement: fired {0} at {1}".format(
-                        scene_times[idx]["name"], song.current_song_time))
+                    ctrl.log_message("record: fired {0} at {1}".format(
+                        scene_times[idx]["name"], now))
                 next_scene[0] += 1
+
+        # Apply automation — set parameter values for any points we've passed
+        for lane in auto_resolved:
+            ni = lane["next"][0]
+            pts = lane["points"]
+            while ni < len(pts) and now >= float(pts[ni]["time"]):
+                val = max(0.0, min(1.0, float(pts[ni]["value"])))
+                try:
+                    lane["param"].value = val
+                except Exception:
+                    pass
+                ni += 1
+                lane["next"][0] = ni
+
+            # Interpolate between points for smooth automation
+            if ni > 0 and ni < len(pts):
+                prev = pts[ni - 1]
+                nxt = pts[ni]
+                t0 = float(prev["time"])
+                t1 = float(nxt["time"])
+                v0 = float(prev["value"])
+                v1 = float(nxt["value"])
+                if t1 > t0:
+                    frac = (now - t0) / (t1 - t0)
+                    frac = max(0.0, min(1.0, frac))
+                    interp = v0 + (v1 - v0) * frac
+                    try:
+                        lane["param"].value = max(0.0, min(1.0, interp))
+                    except Exception:
+                        pass
 
         # Poll again (~100ms per tick)
         ctrl.schedule_message(1, poll_and_fire)
@@ -289,11 +346,21 @@ def _record_arrangement(song, p, ctrl):
     song.stop_playing()
     song.current_song_time = 0.0
     song.clip_trigger_quantization = 4  # 4 = 1 Bar
+
+    # Set initial automation values before recording starts
+    for lane in auto_resolved:
+        if lane["points"]:
+            val = max(0.0, min(1.0, float(lane["points"][0]["value"])))
+            try:
+                lane["param"].value = val
+            except Exception:
+                pass
+
     song.record_mode = True
     song.scenes[0].fire()
     if ctrl:
-        ctrl.log_message("record_arrangement: started, {0} scenes".format(
-            len(scene_times)))
+        ctrl.log_message("record: started, {0} scenes, {1} auto lanes".format(
+            len(scene_times), len(auto_resolved)))
 
     # Start polling for subsequent scenes
     ctrl.schedule_message(1, poll_and_fire)
@@ -304,6 +371,7 @@ def _record_arrangement(song, p, ctrl):
         "total_beats": total_beats,
         "total_bars": total_beats / 4,
         "duration_seconds": total_beats * 60.0 / song.tempo,
+        "automation_lanes": len(auto_resolved),
     }
 
 

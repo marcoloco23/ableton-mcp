@@ -42,7 +42,22 @@ def _find_parameter(track, parameter_name):
 
 
 def create_automation(song, track_index, parameter_name, automation_points, ctrl=None):
-    """Create automation for a track parameter."""
+    """Create automation for a track parameter via clip envelopes.
+
+    Works on session clips. For arrangement automation, write to session
+    clips first then record to arrangement.
+
+    Params:
+        track_index: int
+        parameter_name: str (Volume, Pan, Send A, device N param M)
+        automation_points: list of {time, value, clip_index?}
+            If clip_index is provided per point, writes to that clip slot.
+            Otherwise uses clip_index param or defaults to 0.
+        clip_index: int (default 0) - session clip slot to write to
+        mode: 'clip' (default) or 'arrangement'
+            clip: writes envelope on session clip
+            arrangement: attempts arrangement clip (may not work in all cases)
+    """
     try:
         if track_index < 0 or track_index >= len(song.tracks):
             raise IndexError("Track index out of range")
@@ -54,22 +69,73 @@ def create_automation(song, track_index, parameter_name, automation_points, ctrl
                     parameter_name, track_index
                 )
             )
-        if not hasattr(parameter, "automation_envelope"):
-            raise Exception("Parameter does not support automation")
-        automation_envelope = parameter.automation_envelope
-        if len(automation_points) > 0:
-            start_time = automation_points[0]["time"]
-            end_time = automation_points[-1]["time"]
-            automation_envelope.insert_step(start_time, 0.0, 0.0)
-            automation_envelope.insert_step(end_time, 0.0, 0.0)
-        for point in automation_points:
-            time_val = point["time"]
-            value = max(0.0, min(1.0, point["value"]))
-            automation_envelope.insert_step(time_val, 0.0, value)
+
+        # Group points by clip_index
+        clip_index = 0  # default
+        # Check if automation_points is passed with per-point clip_index
+        # or if there's a top-level clip_index in the points
+        grouped = {}
+        for pt in automation_points:
+            ci = pt.get("clip_index", clip_index)
+            if ci not in grouped:
+                grouped[ci] = []
+            grouped[ci].append(pt)
+
+        total_points = 0
+        clips_written = []
+        debug = []
+
+        for ci, points in grouped.items():
+            if ci < 0 or ci >= len(track.clip_slots):
+                debug.append("slot {0} out of range".format(ci))
+                continue
+            slot = track.clip_slots[ci]
+            if not slot.has_clip:
+                debug.append("slot {0}: no clip".format(ci))
+                continue
+            clip = slot.clip
+            debug.append("slot {0}: clip '{1}', is_audio={2}".format(
+                ci, clip.name, clip.is_audio_clip))
+
+            # Get or create envelope
+            envelope = None
+            try:
+                envelope = clip.automation_envelope(parameter)
+            except Exception:
+                pass
+
+            if envelope is None:
+                try:
+                    envelope = clip.create_automation_envelope(parameter)
+                except Exception as e:
+                    debug.append("slot {0}: create_envelope failed: {1}".format(ci, e))
+
+            if envelope is None:
+                debug.append("  FAILED: no envelope")
+                continue
+
+            # Write points - time is relative to clip start (0 = clip start)
+            for pt in points:
+                time_val = float(pt["time"])
+                value = max(0.0, min(1.0, float(pt["value"])))
+                try:
+                    envelope.insert_step(time_val, 0.0, value)
+                    total_points += 1
+                except Exception as e:
+                    debug.append("  insert_step error: {0}".format(e))
+
+            clips_written.append(ci)
+
+        if ctrl:
+            for d in debug:
+                ctrl.log_message("automation: " + d)
+
         return {
             "parameter": parameter_name,
             "track_index": track_index,
-            "points_added": len(automation_points),
+            "points_added": total_points,
+            "clips_written": clips_written,
+            "debug": debug,
         }
     except Exception as e:
         if ctrl:
