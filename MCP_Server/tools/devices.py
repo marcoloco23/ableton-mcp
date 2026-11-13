@@ -249,6 +249,26 @@ def register(mcp: Any, get_ableton_connection: Callable[[], Any]) -> None:
             return f"Error in lom_batch: {str(e)}"
 
     @mcp.tool()
+    def automate(ctx: Context, lanes: list[dict[str, Any]]) -> str:
+        """Record arrangement automation into the open set: lanes [{"track": "PAD", "param": "Auto Filter.Frequency" | "volume" | "send A",
+        "points": [[73, "900 Hz"], [81, "20 kHz"]], "shape": "ease" | "ease-log"}], bars 1-based, values as Live shows them.
+        Plays only the bars that move with Arrangement Record + Automation Arm and moves the knobs inside a gesture, the way Push writes
+        automation; no save or reopen, Cmd+Z undoes it. Returns at once; poll automate_status until state is done."""
+        try:
+            return json.dumps(get_ableton_connection().send_command("automate", {"lanes": lanes}), indent=2)
+        except Exception as e:
+            logger.error(f"Error in automate: {str(e)}")
+            return f"Error in automate: {str(e)}"
+
+    @mcp.tool()
+    def automate_status(ctx: Context) -> str:
+        """Progress of automate: state running|done|error, the spans (bars) and which one is recording."""
+        try:
+            return json.dumps(get_ableton_connection().send_command("automate_status", {}), indent=2)
+        except Exception as e:
+            return f"Error in automate_status: {str(e)}"
+
+    @mcp.tool()
     def browser_find(ctx: Context, name: str = "", contains: str = "", roots: list[str] | None = None, limit: int = 10) -> str:
         """Find Live browser items by exact name ("Serum 2") or substring, searched inside Live in one call. roots: plugins, audio_effects, instruments, midi_effects, user_folders, packs. Load a match with lom_call('app.browser.load_item', [{"$path": path}]) after selecting the track."""
         try:

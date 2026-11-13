@@ -6,6 +6,7 @@ Toggle control surface off/on to pick up changes.
 
 from __future__ import absolute_import, print_function, unicode_literals
 
+import re
 from . import tracks, browser, devices, arrangement, audio, automation, params
 
 
@@ -1181,6 +1182,14 @@ def _get_registry():
             "handler": lambda song, p, ctrl: _browser_find(song, p, ctrl),
             "modifying": False,
         },
+        "automate": {
+            "handler": lambda song, p, ctrl: _automate(song, p, ctrl),
+            "modifying": True,
+        },
+        "automate_status": {
+            "handler": lambda song, p, ctrl: dict(_AUTOMATE),
+            "modifying": False,
+        },
     }
 
 
@@ -1374,3 +1383,165 @@ def execute(command_type, params, song, ctrl):
     if command_type not in reg:
         raise ValueError("Unknown dynamic command: " + command_type)
     return reg[command_type]["handler"](song, params, ctrl)
+
+
+# ---------------------------------------------------------------------------
+# automate: arrangement automation recorded into the open set, in real time.
+#
+# Live's API cannot write arrangement automation directly, but Live records any
+# parameter move made between begin_gesture() and end_gesture() while Arrangement
+# Record and Automation Arm are on (that is how Push writes automation). So a plan
+# is played back only over the bars that hold moves, with the moves made on every
+# tick; nothing is saved, nothing is reopened, and Cmd+Z takes it back.
+# ---------------------------------------------------------------------------
+
+_AUTOMATE = {"state": "idle"}
+_TICK_BEATS = 0.125  # curve resolution of the precomputed values
+
+
+def _automate_param(song, track, name):
+    """'volume', 'pan', 'send A'..'send L', or '<device>.<parameter>' (device by name or index)."""
+    key = name.strip()
+    md = track.mixer_device
+    if key.lower() == "volume":
+        return md.volume
+    if key.lower() == "pan":
+        return md.panning
+    if key.lower().startswith("send "):
+        return md.sends[ord(key.split()[-1].upper()) - ord("A")]
+    dev_name, _, par = key.partition(".")
+    devs = list(track.devices)
+    dev = devs[int(dev_name)] if dev_name.isdigit() else next(d for d in devs if d.name == dev_name)
+    return params.find_parameter(dev, par)
+
+
+def _automate_curve(param, points, shape):
+    """[(beat, raw)] every _TICK_BEATS from the first to the last point, plus each point exactly."""
+    import math
+    pts = [((float(b) - 1) * 4.0, v) for b, v in sorted(points, key=lambda x: float(x[0]))]
+    unit = lambda v: re.sub(r"^[\s\-+0-9.,]*", "", v) if isinstance(v, str) else ""
+    num = lambda v: params.display_number(v) if isinstance(v, str) else float(v)
+    raw = lambda n, u: params.resolve_value(param, ("%.6g %s" % (n, u)).strip()) if u else float(n)
+    out = []
+    for (t0, v0), (t1, v1) in zip(pts, pts[1:]):
+        n0, n1, u = num(v0), num(v1), unit(v0) or unit(v1)
+        steps = max(1, int(round((t1 - t0) / _TICK_BEATS)))
+        for k in range(steps):
+            x = k / float(steps)
+            e = x * x * (3 - 2 * x) if shape in ("ease", "ease-log") else x
+            if shape == "ease-log" and n0 > 0 and n1 > 0:
+                n = n0 * math.exp(math.log(n1 / n0) * e)
+            else:
+                n = n0 + (n1 - n0) * e
+            out.append((t0 + (t1 - t0) * x, raw(n, u)))
+    t_last, v_last = pts[-1]
+    out.append((t_last, raw(num(v_last), unit(v_last))))
+    return out
+
+
+def _automate(song, p, ctrl):
+    """Record a plan of lanes into the arrangement, only over the bars that move.
+
+    lanes: [{"track": "TOP LOOP 2", "param": "Auto Filter.Frequency" | "volume" | "send A",
+             "points": [[49, "900 Hz"], [57, "20 kHz"]], "shape": "ease-log"}]
+    Values are what Live shows ("-12 dB", "40 %") or raw numbers. Bars are 1-based.
+    Returns at once; automate_status tells progress. Tracks are disarmed while it runs.
+    """
+    if _AUTOMATE.get("state") == "running":
+        raise RuntimeError("automate is already running")
+    names = [t.name for t in song.tracks]
+    lanes = []
+    for lane in p["lanes"]:
+        track = song.tracks[names.index(lane["track"])]
+        param = _automate_param(song, track, lane["param"])
+        curve = _automate_curve(param, lane["points"], lane.get("shape"))
+        lanes.append({"name": "%s / %s" % (lane["track"], lane["param"]), "param": param, "curve": curve})
+    # windows: the spans that hold moves, merged when they touch
+    spans = sorted((l["curve"][0][0], l["curve"][-1][0]) for l in lanes)
+    windows = []
+    for a, b in spans:
+        if windows and a <= windows[-1][1] + 4.0:
+            windows[-1][1] = max(windows[-1][1], b)
+        else:
+            windows.append([a, b])
+    armed = [t for t in song.tracks if getattr(t, "can_be_armed", False) and t.arm]
+    for t in armed:
+        t.arm = False
+    saved = {"automation_arm": song.session_automation_record, "loop": song.loop}
+    song.loop = False
+    song.session_automation_record = True
+    _AUTOMATE.clear()
+    _AUTOMATE.update({"state": "running", "windows": [[a / 4 + 1, b / 4 + 1] for a, b in windows],
+                      "window": 0, "lanes": [l["name"] for l in lanes], "ticks": 0})
+    state = {"w": 0, "phase": "seek", "touching": False}
+
+    def finish(error=None):
+        for l in lanes:
+            try:
+                l["param"].end_gesture()
+            except Exception:
+                pass
+        song.record_mode = False
+        song.stop_playing()
+        song.session_automation_record = saved["automation_arm"]
+        song.loop = saved["loop"]
+        try:
+            song.re_enable_automation()  # the seek set values by hand; hand control back to the lanes
+        except Exception:
+            pass
+        for t in armed:
+            t.arm = True
+        _AUTOMATE.update({"state": "error" if error else "done", "error": error})
+
+    def value_at(curve, now):
+        if now <= curve[0][0]:
+            return curve[0][1]
+        for (t0, v0), (t1, v1) in zip(curve, curve[1:]):
+            if t0 <= now < t1:
+                return v0
+        return curve[-1][1]
+
+    def tick():
+        try:
+            a, b = windows[state["w"]]
+            if state["phase"] == "seek":
+                song.start_playing()
+                song.current_song_time = max(0.0, a - 4.0)  # one bar of pre-roll
+                for l in lanes:
+                    l["param"].value = value_at(l["curve"], a)
+                state["phase"] = "wait"
+            elif state["phase"] == "wait":
+                if song.current_song_time >= a - 0.5:
+                    song.record_mode = True
+                    state["phase"] = "write"
+            else:
+                now = song.current_song_time
+                if not state["touching"] and now >= a:
+                    for l in lanes:
+                        l["param"].begin_gesture()
+                    state["touching"] = True
+                if state["touching"]:
+                    for l in lanes:
+                        if l["curve"][0][0] - _TICK_BEATS <= now <= l["curve"][-1][0] + _TICK_BEATS:
+                            v = value_at(l["curve"], now)
+                            if l["param"].value != v:
+                                l["param"].value = v
+                    _AUTOMATE["ticks"] += 1
+                if now >= b + 0.25:
+                    for l in lanes:
+                        l["param"].end_gesture()
+                    state["touching"] = False
+                    song.record_mode = False
+                    song.stop_playing()
+                    state["w"] += 1
+                    _AUTOMATE["window"] = state["w"]
+                    if state["w"] >= len(windows):
+                        finish()
+                        return
+                    state["phase"] = "seek"
+            ctrl.schedule_message(1, tick)
+        except Exception as e:
+            finish(str(e))
+
+    ctrl.schedule_message(1, tick)
+    return dict(_AUTOMATE)
