@@ -1419,7 +1419,9 @@ def _automate_curve(param, points, shape):
     """[(beat, raw)] every _TICK_BEATS from the first to the last point, plus each point exactly."""
     import math
     pts = [((float(b) - 1) * 4.0, v) for b, v in sorted(points, key=lambda x: float(x[0]))]
-    unit = lambda v: re.sub(r"^[\s\-+0-9.,]*", "", v) if isinstance(v, str) else ""
+    def unit(v):  # display_number turns kHz into Hz and s into ms; the text must say the same
+        u = re.sub(r"^[\s\-+0-9.,]*", "", v).strip() if isinstance(v, str) else ""
+        return {"khz": "Hz", "s": "ms"}.get(u.lower(), u)
     num = lambda v: params.display_number(v) if isinstance(v, str) else float(v)
     raw = lambda n, u: params.resolve_value(param, ("%.6g %s" % (n, u)).strip()) if u else float(n)
     out = []
