@@ -1523,11 +1523,15 @@ def _automate(song, p, ctrl):
                         l["param"].begin_gesture()
                     state["touching"] = True
                 if state["touching"]:
+                    odd = _AUTOMATE["ticks"] % 2
                     for l in lanes:
                         if l["curve"][0][0] - _TICK_BEATS <= now <= l["curve"][-1][0] + _TICK_BEATS:
                             v = value_at(l["curve"], now)
-                            if l["param"].value != v:
-                                l["param"].value = v
+                            prm = l["param"]
+                            # Live records only a value that changes: a flat lane gets an inaudible
+                            # alternating nudge (a millionth of the range), or nothing is written.
+                            eps = (prm.max - prm.min) * 1e-6 if odd and not prm.is_quantized else 0.0
+                            prm.value = min(prm.max, max(prm.min, v + eps)) if v + eps <= prm.max else v - eps
                     _AUTOMATE["ticks"] += 1
                 if now >= b + 0.25:
                     for l in lanes:
