@@ -265,3 +265,47 @@ def test_a_scene_goes_to_the_arrangement_and_session_clips_can_be_deleted(song):
         run(live.clips, song, action="duplicate", scene="Groove", to_bar=1)
     run(live.clips, song, action="delete", scene=2, track="BASS MID")
     assert not song.tracks[0].clip_slots[1].has_clip and song.tracks[1].clip_slots[1].has_clip
+
+
+# an audio file into a session slot or onto the arrangement ------------------------------------------
+
+def test_an_audio_file_lands_in_a_session_slot_with_its_clip_settings(song, tmp_path):
+    wav = tmp_path / "perc loop.wav"
+    wav.write_bytes(b"RIFF")
+    r = run(live.load, song, track="Drums#1", item=str(wav), scene="Groove", clip={"pitch_coarse": -2, "warping": False})
+    assert r == {"track": "Drums", "loaded": "perc loop.wav", "scene": 2,
+                 "clip": {"name": "perc loop", "warping": False, "pitch_coarse": -2}}
+    with pytest.raises(ValueError, match="already has 'perc loop' in scene 2"):
+        run(live.load, song, track="Drums#1", item=str(wav), scene=2)
+
+
+def test_an_audio_file_lands_on_the_arrangement_at_a_bar(song, tmp_path):
+    wav = tmp_path / "vox.wav"
+    wav.write_bytes(b"RIFF")
+    r = run(live.load, song, track="Drums#2", item=str(wav), bar=97, clip={"name": "Vox chop"})
+    assert r["bars"] == "97-100" and r["clip"]["name"] == "Vox chop"
+    with pytest.raises(ValueError, match="bar 98 on 'Drums' is in 'Vox chop' .bars 97-100."):
+        run(live.load, song, track="Drums#2", item=str(wav), bar=98)
+
+
+def test_a_refused_clip_setting_removes_the_new_clip(song, tmp_path):
+    wav = tmp_path / "x.wav"
+    wav.write_bytes(b"RIFF")
+    with pytest.raises(ValueError, match="clip setting pitch_corse: a clip has no 'pitch_corse'; the new clip was removed"):
+        run(live.load, song, track="Drums#1", item=str(wav), scene=1, clip={"pitch_corse": 3})
+    assert not song.tracks[4].clip_slots[0].has_clip
+
+
+@pytest.mark.parametrize("p, why", [({"item": "perc.wav", "scene": 1}, "absolute path of an audio file"),
+                                    ({"item": "/no/such.wav", "bar": 1}, "absolute path of an audio file"),
+                                    ({"item": "/tmp", "scene": 1, "bar": 1}, "not both")])
+def test_audio_loads_say_what_they_need(song, p, why):
+    with pytest.raises(ValueError, match=why):
+        run(live.load, song, track="Drums#1", **p)
+
+
+def test_audio_needs_an_audio_track(song, tmp_path):
+    wav = tmp_path / "x.wav"
+    wav.write_bytes(b"RIFF")
+    with pytest.raises(ValueError, match="'SERUM BASS' is a MIDI track"):
+        run(live.load, song, track="SERUM BASS", item=str(wav), scene=1)

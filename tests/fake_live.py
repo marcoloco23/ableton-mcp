@@ -76,6 +76,7 @@ class Clip:
         self.loop_start, self.loop_end = loop or (0.0, end - start + start_marker)
         self.end_marker = self.loop_end
         self.length = self.loop_end - self.loop_start
+        self.warping, self.pitch_coarse = True, 0
 
     def get_notes_extended(self, from_pitch, pitch_span, from_time, time_span):
         return [n for n in self.notes if from_pitch <= n.pitch < from_pitch + pitch_span
@@ -128,6 +129,9 @@ class Track:
     def delete_clip(self, clip):
         self.arrangement_clips.remove(clip)
 
+    def create_audio_clip(self, path, position):
+        self.arrangement_clips.append(Clip(path.rsplit("/", 1)[-1].rsplit(".", 1)[0], position, position + 16.0))
+
 
 class Slot:
     def __init__(self, clip=None):
@@ -139,6 +143,9 @@ class Slot:
 
     def create_clip(self, length):
         self.clip = Clip("", 0.0, length)
+
+    def create_audio_clip(self, path):
+        self.clip = Clip(path.rsplit("/", 1)[-1].rsplit(".", 1)[0], 0.0, 8.0)
 
     def delete_clip(self):
         self.clip = None

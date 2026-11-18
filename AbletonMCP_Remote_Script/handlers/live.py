@@ -7,6 +7,8 @@ song-absolute; values are what Live shows ("-6 dB", "110 Hz", "High Pass 48dB").
 
 from __future__ import absolute_import, print_function, unicode_literals
 
+import os
+
 from . import lom, params
 from .browser import select_track
 
@@ -708,10 +710,53 @@ def _browser_item(ctrl, item):
                           item, seen, LOAD_DEPTH, "; close: %s" % ", ".join("'%s'" % x for x in near) if near else ""))
 
 
+def _load_audio(song, t, p):
+    """An audio file into a session slot (scene) or onto the arrangement (bar), as a new clip, with
+    the clip properties in p["clip"] set on it. A property Live refuses removes the clip again."""
+    path, settings = p["item"], p.get("clip") or {}
+    if p.get("scene") is not None and p.get("bar") is not None:
+        raise ValueError("give scene (a session slot) or bar (the arrangement), not both")
+    if not os.path.isabs(path) or not os.path.isfile(path):
+        raise ValueError("with scene or bar, item is the absolute path of an audio file; '%s' is not one" % path)
+    if not getattr(t, "has_audio_input", False):
+        raise ValueError("'%s' is a MIDI track; an audio file needs an audio track" % t.name)
+    if p.get("scene") is not None:
+        slot, number = _slot(song, t, p["scene"])
+        if slot.has_clip:
+            raise ValueError("'%s' already has '%s' in scene %d; delete it first (live_clips)"
+                             % (t.name, slot.clip.name, number))
+        slot.create_audio_clip(path)
+        clip, where, remove = slot.clip, {"scene": number}, slot.delete_clip
+    else:
+        beat = lom.beat_of(song, p["bar"])
+        taken = [c for c in _clips(t) if c.start_time - 1e-6 <= beat < c.end_time - 1e-6]
+        if taken:
+            raise ValueError("bar %g on '%s' is in '%s' (bars %s); delete it first (live_clips)" % (
+                float(p["bar"]), t.name, taken[0].name, lom.bars_text(song, taken[0].start_time, taken[0].end_time)))
+        t.create_audio_clip(path, beat)
+        clip = next(c for c in _clips(t) if abs(c.start_time - beat) < 1e-6)
+        remove = lambda: t.delete_clip(clip)
+    try:
+        for k in sorted(settings):
+            if not hasattr(clip, k):
+                raise AttributeError("a clip has no '%s'" % k)
+            setattr(clip, k, settings[k])
+    except Exception as e:
+        remove()
+        raise ValueError("clip setting %s: %s; the new clip was removed again" % (k, e))
+    if p.get("bar") is not None:
+        where = {"bars": lom.bars_text(song, clip.start_time, clip.end_time)}
+    info = dict((k, getattr(clip, k)) for k in ["name", "warping", "pitch_coarse"] + sorted(settings) if hasattr(clip, k))
+    return dict({"track": t.name, "loaded": os.path.basename(path), "clip": info}, **where)
+
+
 def load(song, p, ctrl):
     """Load a device, plugin, preset or sample onto a track, at the end of its chain: Live inserts
-    after the selected device, so the last device is selected first."""
+    after the selected device, so the last device is selected first. With scene or bar, item is an
+    audio file and becomes a new clip there (see _load_audio)."""
     t = lom.track(song, p["track"])
+    if p.get("scene") is not None or p.get("bar") is not None:
+        return _load_audio(song, t, p)
     it = _browser_item(ctrl, p["item"])
     select_track(song, t)
     devices = list(t.devices)

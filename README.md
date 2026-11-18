@@ -152,7 +152,7 @@ The conventions are stated once, in the server's instructions:
 | `live_transport(play, position_bar, loop_bars, loop, tempo, metronome, record)` | Check, then set any of them; report the transport |
 | `live_locators(action, bar, name, locator)` | list, set (add or rename), delete |
 | `live_browser_find(name, contains, roots, limit)` | Search Live's browser inside Live |
-| `live_load(track, item)` | Load a device, plugin, preset or sample by name |
+| `live_load(track, item, scene, bar, clip)` | Load a device, plugin, preset or sample by name at the end of the chain; with `scene` or `bar`, an audio file as a new clip in that session slot or at that arrangement bar, its clip properties (`pitch_coarse`, `warping`, `name`, …) set in the same call |
 | `live_simpler(simpler, sample, start_ms, end_ms, …)` | Load a sample into a Simpler and set its region, warp, mode, fades |
 | `live_automate(lanes)` / `live_automate_status()` | Record arrangement automation in real time |
 | `live_lom(op, path, …)` | Escape hatch: get / set / call / batch on Live's object model by path, with names in brackets: `tracks[BASS MID].devices[EQ Eight].parameters`, `tracks[SUB].arrangement_clips[@113]` |

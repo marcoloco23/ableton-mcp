@@ -318,18 +318,27 @@ def register(mcp: Any, get_ableton_connection: Callable[[], Any]) -> None:
         return out(call("browser_find", name=name or None, contains=contains or None, roots=roots, limit=limit))
 
     @mcp.tool(annotations=_write("Load a device, plugin or preset", destructive=False, idempotent=False))
-    def live_load(ctx: Context, track: str, item: str) -> str:
-        """Load a device, plugin, preset or sample from Live's browser onto a track, at the end of its chain
-        (Live inserts after the selected device, so the last one is selected first). Found by exact name
-        inside Live, searching the first few thousand items a few folders deep, or by any path from
-        live_browser_find. Returns the track's devices after loading.
+    def live_load(ctx: Context, track: str, item: str, scene: str | None = None, bar: float | None = None,
+                  clip: dict[str, Any] | None = None) -> str:
+        """Load something onto a track.
+
+        Without scene or bar: a device, plugin, preset or sample from Live's browser, at the end of the
+        track's chain (Live inserts after the selected device, so the last one is selected first). Found by
+        exact name inside Live, searching the first few thousand items a few folders deep, or by any path
+        from live_browser_find. Returns the track's devices after loading.
+
+        With scene (name, or number from 1) or bar: item is the absolute path of an audio file, placed on
+        an audio track as a new clip in that empty session slot, or in the arrangement starting at that bar.
+        clip sets the new clip's properties in the same call, by their Live names: pitch_coarse
+        (semitones), pitch_fine (cents), warping (true/false), warp_mode, gain, name, looping. If Live
+        refuses one, the new clip is removed again and the error says which.
 
         Examples:
           live_load("BASS MID", "EQ Eight")
-          live_load("PAD", "Auto Filter")
-          live_load("Master", "Limiter")
+          live_load("PERC", "/Users/me/Splice/perc_loop_126.wav", scene="DROP 1", clip={"pitch_coarse": -2, "warping": True})
+          live_load("VOX", "/Users/me/Stems/vox_chop.wav", bar=97, clip={"name": "Vox chop"})
         """
-        return out(call("live_load", track=track, item=item))
+        return out(call("live_load", track=track, item=item, scene=scene, bar=bar, clip=clip))
 
     @mcp.tool(annotations=_write("Set up a Simpler", destructive=True, idempotent=True))
     def live_simpler(ctx: Context, simpler: str, sample: str | None = None, start_ms: float | None = None,
