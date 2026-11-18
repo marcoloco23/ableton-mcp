@@ -147,67 +147,101 @@ def track(song, p, ctrl):
 
 # --- setting -------------------------------------------------------------------------------
 
-def _prepare(song, change):
-    """Resolve one change without applying it: (label, read_before, apply, read_after)."""
-    if not isinstance(change, dict) or "target" not in change or "value" not in change:
-        raise ValueError("each change is {\"target\": \"Track / Device / Param\", \"value\": \"110 Hz\"}")
-    tg, value = lom.target(song, change["target"]), change["value"]
-    t = tg.track
-    if tg.param is not None:
-        prm = tg.param
-        raw = params.resolve_value(prm, value)
-        return (lambda: lom.shown(prm)), (lambda: setattr(prm, "value", raw)), (lambda: lom.shown(prm))
-    if tg.device is not None:
-        on = next((x for x in tg.device.parameters if x.name == "Device On"), None)
-        if on is None:
-            raise ValueError("'%s' is a device; set one of its parameters, or the device on/off with a value of on/off"
-                             % change["target"])
-        raw = 1.0 if lom.to_bool(value, change["target"]) else 0.0
-        return (lambda: lom.shown(on)), (lambda: setattr(on, "value", raw)), (lambda: lom.shown(on))
-    s = tg.setting
-    if s in ("mute", "solo", "arm"):
-        b = lom.to_bool(value, change["target"])
-        read = lambda: "on" if getattr(t, s) else "off"
-        return read, (lambda: setattr(t, s, b)), read
-    if s in lom.ROUTING:
-        attr = lom.ROUTING[s]
-        option = lom.find(getattr(t, "available_%ss" % attr), str(value), "%s option" % s, " of '%s'" % t.name)
-        read = lambda: _route(t, attr)
-        return read, (lambda: setattr(t, attr, option)), read
-    if s == "monitor":
-        m = lom.MONITOR.index(lom.find([_Named(x) for x in lom.MONITOR], str(value), "monitor setting").name)
-        read = lambda: lom.MONITOR[t.current_monitoring_state]
-        return read, (lambda: setattr(t, "current_monitoring_state", m)), read
-    raise ValueError("'%s' names a track; add a device, parameter or setting (volume, pan, send A, mute, solo, "
-                     "arm, output, output channel, input, input channel, monitor)" % change["target"])
-
-
 class _Named(object):
     def __init__(self, name):
         self.name = name
 
 
+def _prepare(song, change, earlier):
+    """Check one change without applying it: (before, apply, undo, after).
+
+    ``earlier`` holds the (track, setting) pairs earlier changes in the same call set: a
+    routing channel after its routing type is looked up when it is applied, among the
+    channels the new type offers.
+    """
+    if not isinstance(change, dict) or "target" not in change or "value" not in change:
+        raise ValueError("each change is {\"target\": \"Track / Device / Param\", \"value\": \"110 Hz\"}")
+    text, value = change["target"], change["value"]
+    tg = lom.target(song, text)
+    t = tg.track
+    if tg.param is not None or tg.device is not None:
+        prm = tg.param
+        if prm is None:
+            prm = next((x for x in tg.device.parameters if x.name == "Device On"), None)
+            if prm is None:
+                raise ValueError("'%s' is a device; set one of its parameters, or switch it with on/off" % text)
+            value = 1.0 if lom.to_bool(value, text) else 0.0
+        if not getattr(prm, "is_enabled", True):
+            raise ValueError("'%s' cannot be changed now: Live has it disabled (a macro or another control holds it)"
+                             % text)
+        raw, old = params.resolve_value(prm, value), prm.value
+        return (lom.shown(prm), lambda: setattr(prm, "value", raw), lambda: setattr(prm, "value", old),
+                lambda: lom.shown(prm))
+    s = tg.setting
+    if s is None:
+        raise ValueError("'%s' names a track; add a device, parameter or setting (volume, pan, send A, mute, solo, "
+                         "arm, output, output channel, input, input channel, monitor)" % text)
+    is_master = t is song.master_track
+    if is_master and s in ("mute", "solo", "arm", "monitor"):
+        raise ValueError("'%s': the master has no %s" % (text, s))
+    if s in ("arm", "monitor") and not getattr(t, "can_be_armed", False):
+        raise ValueError("'%s': '%s' cannot be armed, so it has no %s (group and return tracks don't)" % (text, t.name, s))
+    if s in ("mute", "solo", "arm"):
+        b, old = lom.to_bool(value, text), bool(getattr(t, s))
+        read = lambda: "on" if getattr(t, s) else "off"
+        return (read(), lambda: setattr(t, s, b), lambda: setattr(t, s, old), read)
+    if s == "monitor":
+        m = lom.MONITOR.index(lom.find([_Named(x) for x in lom.MONITOR], str(value), "monitor setting").name)
+        old = t.current_monitoring_state
+        read = lambda: lom.MONITOR[t.current_monitoring_state]
+        return (read(), lambda: setattr(t, "current_monitoring_state", m),
+                lambda: setattr(t, "current_monitoring_state", old), read)
+    attr = lom.ROUTING[s]
+    pick = lambda: lom.find(getattr(t, "available_%ss" % attr), str(value), "%s option" % s, " of '%s'" % t.name)
+    option = None if (s.endswith(" channel") and (id(t), s.split()[0]) in earlier) else pick()
+    old = getattr(t, attr)
+    read = lambda: _route(t, attr)
+    return (_route(t, attr), lambda: setattr(t, attr, option or pick()), lambda: setattr(t, attr, old), read)
+
+
 def set_values(song, p, ctrl):
-    """Apply every change or none: all targets and values are checked before the first one is set."""
-    prepared, errors = [], []
+    """Apply every change or none. Each target and value is checked before the first is set; if Live
+    still refuses one, the changes already made are put back from their recorded before-values."""
+    prepared, errors, earlier = [], [], set()
     for k, change in enumerate(p.get("changes") or []):
         try:
-            prepared.append((change["target"], _prepare(song, change)))
+            prepared.append((change["target"], _prepare(song, change, earlier)))
+            tg = lom.target(song, change["target"])
+            earlier.add((id(tg.track), tg.setting))
         except Exception as e:
             errors.append("change %d (%s): %s" % (k + 1, change.get("target") if isinstance(change, dict) else change, e))
     if errors:
         raise ValueError("nothing was changed:\n" + "\n".join(errors))
     if not prepared:
         raise ValueError("changes is empty")
-    out = []
-    for text, (before, apply, after) in prepared:
-        b = before()
-        apply()
-        out.append({"target": text, "before": b, "after": after()})
+    out, undo = [], []
+    for k, (text, (before, apply, back, after)) in enumerate(prepared):
+        try:
+            apply()
+        except Exception as e:
+            for u in reversed(undo):
+                try:
+                    u()
+                except Exception:
+                    pass
+            raise RuntimeError("change %d (%s) failed in Live: %s. The %d change(s) before it were put back"
+                               % (k + 1, text, e, len(undo)))
+        undo.append(back)
+        out.append({"target": text, "before": before, "after": after()})
     return {"changed": out}
 
 
 # --- notes ---------------------------------------------------------------------------------
+#
+# A note's position is (bar, beat). On an arrangement clip bars count from the song's start;
+# on a session clip (track + scene) from the clip's start. A looped arrangement clip plays
+# from its start marker to its loop end once, then loop start to loop end over and over:
+# reads unroll that, writes go into the first pass only (later passes are repeats of it).
 
 _EXTRA = (("mute", False), ("probability", 1.0), ("velocity_deviation", 0.0), ("release_velocity", 64.0))
 COLUMNS = ["bar", "beat", "pitch", "length", "velocity"]
@@ -222,40 +256,71 @@ def _midi_track(song, name):
     return tg.track
 
 
-def _origin(clip):
-    """Song beat of the clip's clip-time zero (the start marker plays at the clip's start)."""
-    return clip.start_time - clip.start_marker
+def _segments(clip, session=False):
+    """Where a clip's notes sound: [(from, to, clip time at from)] in positions (song beats, or clip
+    beats for a session clip). The first segment is the clip's own notes; later ones repeat its loop."""
+    looping = bool(getattr(clip, "looping", False))
+    if session:
+        return [(0.0, clip.loop_end if looping else clip.end_marker, 0.0)]
+    s, e, m = clip.start_time, clip.end_time, clip.start_marker
+    if not looping:
+        return [(s, e, m)]
+    first, length = max(0.0, clip.loop_end - m), clip.loop_end - clip.loop_start
+    out = [(s, min(e, s + first), m)] if first > 0 else []
+    at = s + first
+    while length > 0 and at < e - 1e-9:
+        out.append((at, min(e, at + length), clip.loop_start))
+        at += length
+    return out
+
+
+def _slot(song, t, scene):
+    sc = lom.scene(song, scene)
+    return list(t.clip_slots)[list(song.scenes).index(sc)], list(song.scenes).index(sc) + 1
+
+
+def _note_row(song, at, n, concise, clip_name):
+    bpb = lom.beats_per_bar(song)
+    bar = int(at / bpb + 1e-6) + 1
+    row = [bar, round(at - (bar - 1) * bpb + 1, 6), n.pitch, round(n.duration, 6), n.velocity]
+    if concise:
+        return row
+    d = dict(zip(COLUMNS, row), clip=clip_name)
+    d.update((k, getattr(n, k)) for k, dflt in _EXTRA if getattr(n, k, dflt) != dflt)
+    return d
 
 
 def read_notes(song, p, ctrl):
-    """Notes on a track's arrangement clips, in bars: bar (1-based, song-absolute), beat (1-based
-    in the bar: 1 the downbeat, 2.5 the eighth after beat 2), pitch, length (beats), velocity."""
+    """Notes in bars: bar, beat (1 the downbeat, 2.5 the eighth after beat 2), pitch, length (beats),
+    velocity. Arrangement clips by song bar, looped ones unrolled; with scene, the session clip there."""
     concise = _concise(p)
     t = _midi_track(song, p["track"])
     start, end = lom.parse_bars(song, p["bars"]) if p.get("bars") else (0.0, 1e9)
-    bpb = lom.beats_per_bar(song)
+    session = p.get("scene") is not None
+    if session:
+        slot, number = _slot(song, t, p["scene"])
+        if not slot.has_clip:
+            raise LookupError("'%s' has no clip in scene %d" % (t.name, number))
+        sources = [slot.clip]
+    else:
+        sources = [c for c in _clips(t) if c.start_time < end and c.end_time > start and getattr(c, "is_midi_clip", True)]
     clips, notes = [], []
-    for c in _clips(t):
-        if not (c.start_time < end and c.end_time > start) or not getattr(c, "is_midi_clip", True):
-            continue
-        clips.append({"name": c.name, "bars": lom.bars_text(song, c.start_time, c.end_time)})
-        o = _origin(c)
-        a, b = max(start, c.start_time), min(end, c.end_time)
-        for n in c.get_notes_extended(0, 128, a - o, b - a):
-            at = o + n.start_time
-            if not (a - 1e-6 <= at < b - 1e-6):
+    for c in sources:
+        segs = _segments(c, session)
+        clips.append(dict({"name": c.name, "bars": lom.bars_text(song, segs[0][0], segs[-1][1]) if segs else ""},
+                          **({"loop_bars": lom.bars_text(song, *segs[0][:2])} if len(segs) > 1 else {})))
+        for a0, b0, ct in segs:
+            a, b = max(start, a0), min(end, b0)
+            if b <= a:
                 continue
-            bar = int(at / bpb + 1e-6) + 1
-            beat = round(at - (bar - 1) * bpb + 1, 6)
-            row = [bar, beat, n.pitch, round(n.duration, 6), n.velocity]
-            if concise:
-                notes.append(row)
-            else:
-                d = dict(zip(COLUMNS, row), clip=c.name)
-                d.update((k, getattr(n, k)) for k, dflt in _EXTRA if getattr(n, k, dflt) != dflt)
-                notes.append(d)
+            for n in c.get_notes_extended(0, 128, ct + (a - a0), b - a):
+                at = a0 + (n.start_time - ct)
+                if a - 1e-6 <= at < b - 1e-6:
+                    notes.append(_note_row(song, at, n, concise, c.name))
     notes.sort(key=lambda r: (r[0], r[1], r[2]) if concise else (r["bar"], r["beat"], r["pitch"]))
     out = {"track": t.name, "bars": lom.bars_text(song, start, end) if p.get("bars") else "all", "clips": clips}
+    if session:
+        out["scene"] = number
     if concise:
         out["columns"] = COLUMNS
     out["notes"] = notes
@@ -263,7 +328,7 @@ def read_notes(song, p, ctrl):
 
 
 def _note_in(song, n):
-    """A note as [bar, beat, pitch, length(, velocity)] or a dict -> (song beat, note dict)."""
+    """A note as [bar, beat, pitch, length(, velocity)] or a dict -> (position, note spec), checked."""
     if isinstance(n, (list, tuple)):
         if len(n) < 4:
             raise ValueError("note %s: give [bar, beat, pitch, length, velocity]" % (list(n),))
@@ -271,115 +336,210 @@ def _note_in(song, n):
     missing = [k for k in COLUMNS[:4] if k not in n]
     if missing:
         raise ValueError("note %s is missing %s" % (n, ", ".join(missing)))
-    at = lom.beat_of(song, n["bar"]) + float(n["beat"]) - 1.0
-    spec = {"pitch": int(n["pitch"]), "duration": float(n["length"]), "velocity": float(n.get("velocity", 100))}
+    bpb = lom.beats_per_bar(song)
+    pitch, length, vel, beat = int(n["pitch"]), float(n["length"]), float(n.get("velocity", 100)), float(n["beat"])
+    problems = [w for w, bad in (("pitch is 0-127", not 0 <= pitch <= 127), ("length must be above 0", length <= 0),
+                                 ("velocity is 1-127", not 1 <= vel <= 127),
+                                 ("beat is 1 to below %g" % (bpb + 1), not 1 <= beat < bpb + 1)) if bad]
+    if problems:
+        raise ValueError("note %s: %s" % ([n[k] for k in COLUMNS if k in n], "; ".join(problems)))
+    spec = {"pitch": pitch, "duration": length, "velocity": vel}
     spec.update((k, n[k]) for k, _ in _EXTRA if k in n)
-    return at, spec
+    return lom.beat_of(song, n["bar"]) + beat - 1.0, spec
 
 
 def write_notes(song, p, ctrl):
-    """Write notes into bars [start_bar, start_bar + bars) of a MIDI track.
+    """Write notes into bars [start_bar, start_bar + bars) of a MIDI track (or, with scene, of the
+    session clip there, bar 1 its start).
 
-    mode "replace" clears those bars first, "add" keeps what is there. Clips that cover the
-    bars are written into; with no clip there, one is created over exactly those bars. A
-    clip covering only part of them is an error (say which), never a guess.
+    mode "replace" clears those bars first, "add" keeps what is there. Clips that cover the bars
+    are written into; with no clip there, one is created. A clip covering only part of the bars,
+    or bars that are a looped clip's repeats, is an error that says so. Everything is checked and
+    every clip's notes are built before the first note is removed or a clip created.
     """
     t = _midi_track(song, p["track"])
     mode = p.get("mode", "replace")
     if mode not in ("replace", "add"):
         raise ValueError("mode is 'replace' or 'add', not '%s'" % mode)
     first, count = float(p["start_bar"]), float(p["bars"])
+    if count <= 0 or first < 1:
+        raise ValueError("start_bar is 1 or later and bars at least 1")
     start, end = lom.beat_of(song, first), lom.beat_of(song, first + count)
-    if count <= 0:
-        raise ValueError("bars must be at least 1")
+    span = lom.bars_text(song, start, end)
     placed = []
     for n in p.get("notes") or []:
         at, spec = _note_in(song, n)
         if not (start - 1e-6 <= at < end - 1e-6):
-            raise ValueError("a note at bar %g beat %g is outside bars %s" % (
-                float(n["bar"] if isinstance(n, dict) else n[0]), float(n["beat"] if isinstance(n, dict) else n[1]),
-                lom.bars_text(song, start, end)))
+            bar = int(at / lom.beats_per_bar(song) + 1e-6) + 1
+            raise ValueError("a note at bar %d beat %g is outside bars %s" % (
+                bar, round(at - lom.beat_of(song, bar) + 1, 6), span))
         placed.append((at, spec))
-    clips = sorted((c for c in _clips(t) if c.start_time < end - 1e-6 and c.end_time > start + 1e-6),
-                   key=lambda c: c.start_time)
-    created = not clips
-    if created:
-        t.create_midi_clip(start, end - start)
-        clips = [c for c in _clips(t) if abs(c.start_time - start) < 1e-6]
+    session = p.get("scene") is not None
+    create = None
+    if session:
+        slot, number = _slot(song, t, p["scene"])
+        clips = [slot.clip] if slot.has_clip else []
         if not clips:
-            raise RuntimeError("Live did not create a clip at bar %g on '%s'" % (first, t.name))
+            create = lambda: (slot.create_clip(end), [slot.clip])[1]
     else:
-        edge, gaps = start, []
-        for c in clips:
-            if c.start_time > edge + 1e-6:
-                gaps.append(lom.bars_text(song, edge, c.start_time))
-            edge = max(edge, c.end_time)
-        if edge < end - 1e-6:
-            gaps.append(lom.bars_text(song, edge, end))
-        if gaps:
-            raise ValueError("bars %s on '%s' are only partly in clips (%s); no clip covers bars %s. Write within "
-                             "a clip, or delete those clips first (live_clips)" % (
-                                 lom.bars_text(song, start, end), t.name,
-                                 ", ".join("'%s' %s" % (c.name, lom.bars_text(song, c.start_time, c.end_time)) for c in clips),
-                                 ", ".join(gaps)))
+        clips = sorted((c for c in _clips(t) if c.start_time < end - 1e-6 and c.end_time > start + 1e-6),
+                       key=lambda c: c.start_time)
+        if not clips:
+            def create():
+                t.create_midi_clip(start, end - start)
+                return [c for c in _clips(t) if abs(c.start_time - start) < 1e-6]
+        else:
+            edge, gaps = start, []
+            for c in clips:
+                if c.start_time > edge + 1e-6:
+                    gaps.append(lom.bars_text(song, edge, c.start_time))
+                edge = max(edge, c.end_time)
+            if edge < end - 1e-6:
+                gaps.append(lom.bars_text(song, edge, end))
+            if gaps:
+                raise ValueError("bars %s on '%s' are only partly in clips (%s); no clip covers bars %s. Write within "
+                                 "a clip, or delete those clips first (live_clips)" % (
+                                     span, t.name,
+                                     ", ".join("'%s' %s" % (c.name, lom.bars_text(song, c.start_time, c.end_time))
+                                               for c in clips), ", ".join(gaps)))
+    # plan: (clip or None for the one to create, clip-time from, length, specs)
+    plan = []
+    for c in clips or [None]:
+        a0, b0, ct = _segments(c, session)[0] if c is not None else ((0.0, end, 0.0) if session else (start, end, 0.0))
+        a, b = (max(start, c.start_time), min(end, c.end_time)) if c is not None and not session else (start, end)
+        if b > b0 + 1e-6:
+            own, extra = lom.bars_text(song, a0, b0), lom.bars_text(song, max(a, b0), b)
+            if getattr(c, "looping", False):
+                raise ValueError("'%s' holds its notes in bars %s and %s; notes in bars %s would never play as "
+                                 "written. Write within bars %s, or turn the clip's loop off" % (
+                                     c.name, own, "loops them" if session else "repeats them to its end", extra, own))
+            raise ValueError("'%s' plays bars %s; bars %s are past its end" % (c.name, own, extra))
+        mine = [dict(spec, start_time=ct + (at - a0)) for at, spec in placed if a - 1e-6 <= at < b - 1e-6]
+        plan.append((c, ct + (a - a0), b - a, lom.note_specs(mine) if mine else ()))
+    if create is not None:
+        made = create()
+        if not made:
+            raise RuntimeError("Live did not create a clip at bar %g on '%s'" % (first, t.name))
+        plan = [(made[0],) + plan[0][1:]]
     removed = added = 0
-    for c in clips:
-        o = _origin(c)
-        a, b = max(start, c.start_time), min(end, c.end_time)
+    for c, frm, length, specs in plan:
         if mode == "replace":
-            removed += len(list(c.get_notes_extended(0, 128, a - o, b - a)))
-            c.remove_notes_extended(0, 128, a - o, b - a)
-        mine = [dict(spec, start_time=at - o) for at, spec in placed if a - 1e-6 <= at < b - 1e-6]
-        if mine:
-            c.add_new_notes(lom.note_specs(mine))
-            added += len(mine)
+            removed += len(list(c.get_notes_extended(0, 128, frm, length)))
+            c.remove_notes_extended(0, 128, frm, length)
+        if specs:
+            c.add_new_notes(specs)
+            added += len(specs)
         if p.get("clip_name"):
             c.name = p["clip_name"]
-    return {"track": t.name, "bars": lom.bars_text(song, start, end), "mode": mode, "removed": removed, "added": added,
-            "clips": [dict({"name": c.name, "bars": lom.bars_text(song, c.start_time, c.end_time)},
-                           **({"created": True} if created else {})) for c in clips]}
+    out = {"track": t.name, "bars": span, "mode": mode, "removed": removed, "added": added,
+           "clips": [dict({"name": c.name}, **({"created": True} if create is not None else {}),
+                          **({} if session else {"bars": lom.bars_text(song, c.start_time, c.end_time)}))
+                     for c, _, _, _ in plan]}
+    if session:
+        out["scene"] = number
+    return out
 
 
-# --- clips, tracks, transport, locators ----------------------------------------------------
+# --- clips, scenes, tracks, transport, locators --------------------------------------------
+
+CLIP_ACTIONS = ("duplicate", "move", "delete", "mute", "unmute", "rename", "to_arrangement")
+
 
 def clips(song, p, ctrl):
-    """duplicate | move | delete | mute | unmute | rename the arrangement clips that start in `bars`."""
+    """Act on arrangement clips that start in `bars`, or on the session clips in `scene`, on one
+    track or every track: duplicate | move | delete | mute | unmute | rename | to_arrangement."""
     action = p.get("action")
-    start, end = lom.parse_bars(song, p["bars"])
+    if action not in CLIP_ACTIONS:
+        raise ValueError("action is %s, not '%s'" % (", ".join(CLIP_ACTIONS), action))
     tracks = [lom.track(song, p["track"])] if p.get("track") else list(song.tracks)
-    chosen = [(t, c) for t in tracks for c in _clips(t) if start - 1e-6 <= c.start_time < end - 1e-6]
-    if action not in ("duplicate", "move", "delete", "mute", "unmute", "rename"):
-        raise ValueError("action is duplicate, move, delete, mute, unmute or rename, not '%s'" % action)
-    if not chosen:
-        raise LookupError("no clip starts in bars %s on %s" % (
-            lom.bars_text(song, start, end), "'%s'" % p["track"] if p.get("track") else "any track"))
-    rows = lambda pairs: [{"track": t.name, "name": c.name, "bars": lom.bars_text(song, c.start_time, c.end_time)}
-                          for t, c in pairs]
-    before = rows(chosen)
-    if action in ("duplicate", "move"):
+    where = "'%s'" % p["track"] if p.get("track") else "any track"
+    session = p.get("scene") is not None
+    if action in ("duplicate", "move") and session:
+        raise ValueError("%s works on arrangement clips (give bars); to put session clips in the arrangement use "
+                         "to_arrangement" % action)
+    if action == "to_arrangement" and not session:
+        raise ValueError("to_arrangement copies the session clips of a scene: give scene and to_bar")
+    if action == "rename" and not p.get("name"):
+        raise ValueError("rename needs name")
+    if session:
+        sc = lom.scene(song, p["scene"])
+        number = list(song.scenes).index(sc) + 1
+        slots = [(t, list(t.clip_slots)[number - 1]) for t in tracks]
+        chosen = [(t, s.clip, s) for t, s in slots if s.has_clip]
+        if not chosen:
+            raise LookupError("no session clip in scene %d on %s" % (number, where))
+        before = [{"track": t.name, "name": c.name, "scene": number} for t, c, _ in chosen]
+    else:
+        if not p.get("bars"):
+            raise ValueError("%s needs bars (arrangement clips) or scene (session clips)" % action)
+        start, end = lom.parse_bars(song, p["bars"])
+        chosen = [(t, c, None) for t in tracks for c in _clips(t) if start - 1e-6 <= c.start_time < end - 1e-6]
+        if not chosen:
+            raise LookupError("no clip starts in bars %s on %s" % (lom.bars_text(song, start, end), where))
+        before = [{"track": t.name, "name": c.name, "bars": lom.bars_text(song, c.start_time, c.end_time)}
+                  for t, c, _ in chosen]
+    if action in ("duplicate", "move", "to_arrangement"):
         if p.get("to_bar") is None:
             raise ValueError("%s needs to_bar" % action)
         to, times = lom.beat_of(song, p["to_bar"]), int(p.get("times", 1))
-        span = end - start
+        if times < 1:
+            raise ValueError("times is 1 or more")
+        if session:  # a scene's clips go side by side; repeats are the longest clip apart
+            span, offset = max(c.length for _, c, _ in chosen), lambda c: 0.0
+        else:
+            span, offset = end - start, lambda c: c.start_time - start
         if action == "move" and (times != 1 or to < end and to + span > start):
             raise ValueError("move goes once, to bars that do not overlap the clips' own")
         for k in range(times):
-            for t, c in chosen:
-                t.duplicate_clip_to_arrangement(c, to + k * span + (c.start_time - start))
+            for t, c, _ in chosen:
+                t.duplicate_clip_to_arrangement(c, to + k * span + offset(c))
         if action == "move":
-            for t, c in chosen:
+            for t, c, _ in chosen:
                 t.delete_clip(c)
         return {"action": action, "clips": before, "to": lom.bars_text(song, to, to + times * span), "times": times}
-    for t, c in chosen:
+    for t, c, slot in chosen:
         if action == "delete":
-            t.delete_clip(c)
+            slot.delete_clip() if slot is not None else t.delete_clip(c)
         elif action in ("mute", "unmute"):
             c.muted = action == "mute"
         else:
-            if not p.get("name"):
-                raise ValueError("rename needs name")
             c.name = p["name"]
     return {"action": action, "clips": before}
+
+
+def _scenes(song):
+    return [{"scene": k + 1, "name": s.name,
+             "clips": [t.name for t in song.tracks if list(t.clip_slots)[k].has_clip]}
+            for k, s in enumerate(song.scenes)]
+
+
+def scenes(song, p, ctrl):
+    """list | create | rename | fire | delete session scenes, by name or number (1 the top one)."""
+    action = p.get("action", "list")
+    if action == "list":
+        return {"scenes": _scenes(song)}
+    if action == "create":
+        at = list(song.scenes).index(lom.scene(song, p["scene"])) + 1 if p.get("scene") is not None else len(song.scenes)
+        song.create_scene(at)
+        if p.get("name"):
+            list(song.scenes)[at].name = p["name"]
+        return {"action": action, "scene": at + 1, "scenes": _scenes(song)}
+    if p.get("scene") is None:
+        raise ValueError("%s needs scene" % action)
+    sc = lom.scene(song, p["scene"])
+    number = list(song.scenes).index(sc) + 1
+    if action == "rename":
+        if not p.get("name"):
+            raise ValueError("rename needs name")
+        sc.name = p["name"]
+    elif action == "fire":
+        sc.fire()
+        return {"action": action, "scene": number, "name": sc.name}
+    elif action == "delete":
+        song.delete_scene(number - 1)
+    else:
+        raise ValueError("action is list, create, rename, fire or delete, not '%s'" % action)
+    return {"action": action, "scene": number, "scenes": _scenes(song)}
 
 
 def tracks(song, p, ctrl):
@@ -422,21 +582,36 @@ def tracks(song, p, ctrl):
 
 
 def transport(song, p, ctrl):
-    """Change what is given (tempo, loop_bars, loop, position_bar, metronome, play), then report the state."""
+    """Check every argument, then change what is given (tempo, loop_bars, loop, metronome,
+    position_bar, record, play) and report the state."""
+    todo = []
     if p.get("tempo") is not None:
-        song.tempo = float(p["tempo"])
+        tempo = float(p["tempo"])
+        if not 20 <= tempo <= 999:
+            raise ValueError("tempo is 20-999 BPM, not %g" % tempo)
+        todo.append(lambda: setattr(song, "tempo", tempo))
     if p.get("loop_bars"):
         a, b = lom.parse_bars(song, p["loop_bars"])
-        song.loop_start, song.loop_length = a, b - a
-    if p.get("loop") is not None:
-        song.loop = lom.to_bool(p["loop"], "loop")
-    if p.get("metronome") is not None:
-        song.metronome = lom.to_bool(p["metronome"], "metronome")
+        todo.append(lambda: (setattr(song, "loop_start", a), setattr(song, "loop_length", b - a)))
+    for key in ("loop", "metronome"):
+        if p.get(key) is not None:
+            v = lom.to_bool(p[key], key)
+            todo.append(lambda k=key, v=v: setattr(song, k, v))
     if p.get("position_bar") is not None:
-        song.current_song_time = lom.beat_of(song, p["position_bar"])
+        if float(p["position_bar"]) < 1:
+            raise ValueError("position_bar is 1 or later")
+        beat = lom.beat_of(song, p["position_bar"])
+        todo.append(lambda: setattr(song, "current_song_time", beat))
+    if p.get("record") is not None:
+        rec = lom.to_bool(p["record"], "record")
+        todo.append(lambda: setattr(song, "record_mode", rec))
     if p.get("play") is not None:
-        (song.start_playing if lom.to_bool(p["play"], "play") else song.stop_playing)()
-    return {"playing": bool(song.is_playing), "position_bar": lom.bar_of(song, song.current_song_time),
+        play = lom.to_bool(p["play"], "play")
+        todo.append(lambda: (song.start_playing if play else song.stop_playing)())
+    for step in todo:
+        step()
+    return {"playing": bool(song.is_playing), "recording": bool(song.record_mode),
+            "position_bar": lom.bar_of(song, song.current_song_time),
             "tempo": song.tempo, "signature": "%d/%d" % (song.signature_numerator, song.signature_denominator),
             "loop": bool(song.loop), "loop_bars": lom.bars_text(song, song.loop_start, song.loop_start + song.loop_length),
             "metronome": bool(song.metronome)}
@@ -452,6 +627,10 @@ def locators(song, p, ctrl):
     action = p.get("action", "list")
     if action == "list":
         return {"locators": _locators(song)}
+    if action not in ("set", "delete"):
+        raise ValueError("action is list, set or delete, not '%s'" % action)
+    if action == "set" and not p.get("name"):
+        raise ValueError("set needs name")
     cues = list(song.cue_points)
     if p.get("locator"):
         cue = lom.find(cues, p["locator"], "locator")
@@ -461,12 +640,8 @@ def locators(song, p, ctrl):
     else:
         raise ValueError("%s needs bar or locator" % action)
     if action == "set" and cue is not None:
-        if not p.get("name"):
-            raise ValueError("set needs name")
         cue.name = p["name"]
         return {"locators": _locators(song)}
-    if action not in ("set", "delete"):
-        raise ValueError("action is list, set or delete, not '%s'" % action)
     if action == "delete" and cue is None:
         raise LookupError("no locator at bar %g; locators: %s" % (p["bar"], _locators(song)))
     if song.is_playing:
@@ -488,10 +663,12 @@ def locators(song, p, ctrl):
 # --- loading -------------------------------------------------------------------------------
 
 LOAD_ROOTS = ("audio_effects", "instruments", "midi_effects", "plugins", "drums", "user_folders", "packs")
+LOAD_DEPTH, LOAD_ITEMS = 4, 5000  # devices and plugins sit 2-3 deep; this keeps the scan to a second or two
 
 
 def _browser_item(ctrl, item):
-    """A browser item by exact name (searched inside Live), or by the path live_browser_find gave."""
+    """A browser item by exact name, searched breadth-first inside Live (bounded), or by the path
+    live_browser_find gave."""
     if item.startswith("app.browser"):
         return lom.resolve(None, ctrl, item)
     browser = ctrl.application().browser
@@ -499,36 +676,31 @@ def _browser_item(ctrl, item):
     for r in LOAD_ROOTS:
         top = getattr(browser, r, None)
         if top is not None:
-            stack.extend(top if r == "user_folders" else top.children)
+            stack.extend((it, 1) for it in (top if r == "user_folders" else top.children))
     want, seen = lom._norm(item).lower(), 0
-    while stack and seen < 20000:
-        it = stack.pop(0)
+    while stack and seen < LOAD_ITEMS:
+        it, depth = stack.pop(0)
         seen += 1
         n = str(it.name)
         if lom._norm(n).lower() == want and it.is_loadable:
             return it
         if want in n.lower() and it.is_loadable and len(near) < 8:
             near.append(n)
-        if it.is_folder:
-            stack.extend(it.children)
-    raise LookupError("no loadable browser item '%s'%s; live_browser_find searches by part of a name" % (
-        item, "; close: %s" % ", ".join("'%s'" % x for x in near) if near else ""))
+        if it.is_folder and depth < LOAD_DEPTH:
+            stack.extend((ch, depth + 1) for ch in it.children)
+    raise LookupError("no loadable browser item '%s' in the first %d items, %d folders deep%s; live_browser_find "
+                      "searches deeper by part of a name, and its path loads anything" % (
+                          item, seen, LOAD_DEPTH, "; close: %s" % ", ".join("'%s'" % x for x in near) if near else ""))
 
 
 def load(song, p, ctrl):
-    """Load a device, plugin, preset or sample onto a track: find it, select the track, load."""
+    """Load a device, plugin, preset or sample onto a track, at the end of its chain: Live inserts
+    after the selected device, so the last device is selected first."""
     t = lom.track(song, p["track"])
     it = _browser_item(ctrl, p["item"])
     select_track(song, t)
+    devices = list(t.devices)
+    if devices:
+        song.view.select_device(devices[-1])
     ctrl.application().browser.load_item(it)
     return {"track": t.name, "loaded": str(it.name), "devices": [d.name for d in t.devices]}
-
-
-def record_clip(song, p, ctrl):
-    """Record a session clip into the arrangement from a bar (the slot by scene name or number)."""
-    from . import session
-    t = lom.track(song, p["track"])
-    scene = lom.find(song.scenes, str(p["scene"]), "scene") if not str(p["scene"]).isdigit() \
-        else list(song.scenes)[int(p["scene"]) - 1]
-    return session.record_arrangement_clip(song, list(song.tracks).index(t), list(song.scenes).index(scene),
-                                           lom.beat_of(song, p.get("start_bar", 1)), ctrl)

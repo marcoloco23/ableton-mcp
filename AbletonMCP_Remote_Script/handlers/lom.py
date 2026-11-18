@@ -52,22 +52,35 @@ class Ambiguous(LookupError):
 
 
 def find(items, key, what="item", where=""):
-    """The one item called ``key``. 'Name#2' is the second of that name; digits alone are an index."""
+    """The one item called ``key``; 'Name#2' is the second of several with that name.
+    A position is not a name: LOM paths take it as '.N', scenes as a number (see scene)."""
     items = list(items)
     hits = _matches(items, key)
     if len(hits) == 1:
         return hits[0]
     if len(hits) > 1:
-        raise Ambiguous("%d %ss%s are named '%s'; say '%s#1' … '%s#%d'"
-                        % (len(hits), what, where, key, key, key, len(hits)))
+        at = [items.index(h) + 1 for h in hits]
+        raise Ambiguous("%d %ss%s are named '%s', at positions %s and %d of %d; say %s" % (
+            len(hits), what, where, key, ", ".join(str(a) for a in at[:-1]), at[-1], len(items),
+            " or ".join("'%s#%d'" % (key, k + 1) for k in range(len(hits)))))
     m = re.match(r"^(.*)#(\d+)$", key)
     if m:
         same = _matches(items, m.group(1))
         if 1 <= int(m.group(2)) <= len(same):
             return same[int(m.group(2)) - 1]
-    if key.strip().isdigit() and int(key) < len(items):
-        return items[int(key)]
     raise LookupError(names_hint(items, key, what, where))
+
+
+def scene(song, key):
+    """A scene by name, or by its number as Live shows it (1 is the top scene)."""
+    scenes = list(song.scenes)
+    hits = _matches(scenes, str(key))
+    if hits or not str(key).strip().isdigit():
+        return find(scenes, str(key), "scene")
+    n = int(key)
+    if not 1 <= n <= len(scenes):
+        raise LookupError("no scene %d; scenes are numbered 1 to %d" % (n, len(scenes)))
+    return scenes[n - 1]
 
 
 def _take(parts, i, items, what, where=""):
@@ -398,6 +411,8 @@ def set_param_value(param, value):
 def lom_set(song, p, ctrl):
     """{path, value | value_path}. A parameter path takes what Live shows ("-6 dB", "110 Hz").
     An object property given a name picks that option: 'tracks[X].output_routing_type' = "Master"."""
+    if p.get("value") is None and not p.get("value_path"):
+        raise ValueError("set '%s' needs a value (or value_path for an object)" % p["path"])
     steps = parse_path(p["path"])
     target = resolve(song, ctrl, p["path"])
     if is_param(target) and "value_path" not in p:

@@ -37,7 +37,8 @@ def test_a_miss_lists_the_names_and_the_close_ones(song):
 
 
 def test_two_of_one_name_are_told_apart_by_number(song):
-    with pytest.raises(LookupError, match="2 tracks are named 'Drums'; say 'Drums#1'"):
+    with pytest.raises(LookupError, match="2 tracks are named 'Drums', at positions 5 and 6 of 6; "
+                                          "say 'Drums#1' or 'Drums#2'"):
         get(song, "tracks[Drums]")
     assert lom.resolve(song, Ctrl(), "tracks[Drums#2]") is song.tracks[5]
 

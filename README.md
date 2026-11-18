@@ -133,25 +133,28 @@ The conventions are stated once, in the server's instructions:
   The master is `Master`. A name matches exactly, then ignoring case; `"EQ Eight#2"` picks the second of two.
   A miss lists the names there are and the close ones.
 - **Bars are 1-based and song-absolute**, ranges inclusive (`"49-52"`). Notes are
-  `[bar, beat, pitch, length, velocity]`, beat 1 the downbeat, length in beats.
+  `[bar, beat, pitch, length, velocity]`, beat 1 the downbeat, length in beats. A looped clip reads
+  unrolled; writes go into its own notes, never its repeats.
+- **Session view by scene**: name or number (1 is the top scene). With `scene=`, the notes tools read and
+  write that slot's clip, bars counted from the clip's start.
 - **Values are what Live shows**: `"-6 dB"`, `"-inf dB"`, `"110 Hz"`, `"25L"`, `"High Pass 48dB"`, `"On"`.
 
 | Tool | Job |
 |------|-----|
 | `live_overview(response_format)` | The whole set: sections from the locators with what plays in each, every track (group, flags, volume, output, devices, clip bars), returns, master |
 | `live_track(track, response_format)` | One track, or one device on it (`"SERUM BASS / Saturator"`): mixer, sends, routing, every parameter as shown, clips |
-| `live_set(changes)` | Any number of parameters and track settings by shown value; all checked before any is set; returns before → after |
-| `live_notes_read(track, bars, as_grid, response_format)` | Notes in bars, from every clip on the track |
-| `live_notes_write(track, start_bar, bars, notes \| grid, mode, clip_name)` | Replace or add notes in bars; creates the clip when none covers them |
-| `live_clips(action, bars, track, to_bar, times, name)` | duplicate, move, delete, mute, unmute, rename the clips that start in bars |
+| `live_set(changes)` | Any number of parameters and track settings by shown value; all checked before any is set, the rest put back if Live refuses one; returns before → after |
+| `live_notes_read(track, bars, scene, as_grid, response_format)` | Notes in bars, from every clip on the track (or the session clip in scene) |
+| `live_notes_write(track, start_bar, bars, notes \| grid, mode, clip_name, scene)` | Replace or add notes in bars; creates the clip when none covers them; all checked before anything changes |
+| `live_clips(action, bars \| scene, track, to_bar, times, name)` | duplicate, move, delete, mute, unmute, rename the arrangement clips that start in bars, or the session clips of a scene; to_arrangement copies a scene into the arrangement |
+| `live_scenes(action, scene, name)` | list, create, rename, fire, delete scenes |
 | `live_tracks(action, track, name, kind)` | create, duplicate, delete, rename |
-| `live_transport(play, position_bar, loop_bars, loop, tempo, metronome)` | Set any of them, report the transport |
+| `live_transport(play, position_bar, loop_bars, loop, tempo, metronome, record)` | Check, then set any of them; report the transport |
 | `live_locators(action, bar, name, locator)` | list, set (add or rename), delete |
 | `live_browser_find(name, contains, roots, limit)` | Search Live's browser inside Live |
 | `live_load(track, item)` | Load a device, plugin, preset or sample by name |
 | `live_simpler(simpler, sample, start_ms, end_ms, …)` | Load a sample into a Simpler and set its region, warp, mode, fades |
 | `live_automate(lanes)` / `live_automate_status()` | Record arrangement automation in real time |
-| `live_record_clip(track, scene, start_bar)` | Record a session clip into the arrangement |
 | `live_lom(op, path, …)` | Escape hatch: get / set / call / batch on Live's object model by path, with names in brackets: `tracks[BASS MID].devices[EQ Eight].parameters`, `tracks[SUB].arrangement_clips[@113]` |
 | `live_reload_handlers()` | Reload the Remote Script after `deploy.sh` |
 

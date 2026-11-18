@@ -465,8 +465,9 @@ class AbletonMCP(ControlSurface):
                         self.schedule_message(0, dynamic_main_thread_task)
                     except AssertionError:
                         dynamic_main_thread_task()
+                    wait = getattr(handlers.dispatch, "timeout", lambda c: 10.0)(command_type)
                     try:
-                        task_response = response_queue.get(timeout=10.0)
+                        task_response = response_queue.get(timeout=wait)
                         if task_response.get("status") == "error":
                             response["status"] = "error"
                             response["message"] = task_response.get("message", "Unknown error")
@@ -474,7 +475,9 @@ class AbletonMCP(ControlSurface):
                             response["result"] = task_response.get("result", {})
                     except queue.Empty:
                         response["status"] = "error"
-                        response["message"] = "Timeout waiting for dynamic operation"
+                        response["message"] = (
+                            "Timeout: Live took longer than {0:g} s on {1}. It may still be finishing it; "
+                            "read the state before retrying.".format(wait, command_type))
                 else:
                     response["result"] = handlers.dispatch.execute(
                         command_type, params, song, ctrl

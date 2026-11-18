@@ -19,7 +19,7 @@ class Param:
     def __init__(self, name, show=lambda v: "%.2f" % v, lo=0.0, hi=1.0, value=None, items=None):
         self.name, self.show, self.min, self.max = name, show, lo, hi
         self.value = lo if value is None else value
-        self.is_quantized = items is not None
+        self.is_quantized, self.is_enabled = items is not None, True
         self.value_items = list(items or [])
 
     def str_for_value(self, v):
@@ -66,9 +66,16 @@ class Note:
 
 
 class Clip:
-    def __init__(self, name, start, end, notes=(), start_marker=0.0, muted=False):
+    """An arrangement clip over [start, end) in song beats, or a session clip (start 0). With loop=(a, b)
+    it loops clip time a..b after playing from its start marker to b."""
+
+    def __init__(self, name, start, end, notes=(), start_marker=0.0, muted=False, loop=None):
         self.name, self.start_time, self.end_time, self.start_marker, self.muted = name, start, end, start_marker, muted
         self.notes, self.is_midi_clip = list(notes), True
+        self.looping = loop is not None
+        self.loop_start, self.loop_end = loop or (0.0, end - start + start_marker)
+        self.end_marker = self.loop_end
+        self.length = self.loop_end - self.loop_start
 
     def get_notes_extended(self, from_pitch, pitch_span, from_time, time_span):
         return [n for n in self.notes if from_pitch <= n.pitch < from_pitch + pitch_span
@@ -107,6 +114,8 @@ class Track:
         self.input_routing_type = self.available_input_routing_types[0]
         self.available_output_routing_channels = self.available_input_routing_channels = []
         self.current_monitoring_state = 1
+        self.can_be_armed = True
+        self.clip_slots = [Slot(), Slot()]
 
     def create_midi_clip(self, start, length):
         self.arrangement_clips.append(Clip("", start, start + length))
@@ -120,6 +129,29 @@ class Track:
         self.arrangement_clips.remove(clip)
 
 
+class Slot:
+    def __init__(self, clip=None):
+        self.clip = clip
+
+    @property
+    def has_clip(self):
+        return self.clip is not None
+
+    def create_clip(self, length):
+        self.clip = Clip("", 0.0, length)
+
+    def delete_clip(self):
+        self.clip = None
+
+
+class Scene:
+    def __init__(self, name):
+        self.name, self.fired = name, 0
+
+    def fire(self):
+        self.fired += 1
+
+
 class Cue:
     def __init__(self, name, time):
         self.name, self.time = name, time
@@ -131,7 +163,23 @@ class Song:
         self.master_track = Track("Master", [Device("Limiter")], sends=())
         self.signature_numerator, self.signature_denominator = 4, 4
         self.tempo, self.loop, self.loop_start, self.loop_length = 124.0, True, 0.0, 32.0
-        self.current_song_time, self.is_playing, self.metronome = 0.0, False, False
+        self.current_song_time, self.is_playing, self.metronome, self.record_mode = 0.0, False, False, False
+        self.scenes = [Scene("Intro"), Scene("Groove")]
+        self.master_track.can_be_armed = False
+        for r in self.return_tracks:
+            r.can_be_armed = False
+        self.view = types.SimpleNamespace(selected_track=None, selected_device=None)
+        self.view.select_device = lambda d: setattr(self.view, "selected_device", d)
+
+    def create_scene(self, i):
+        self.scenes.insert(i, Scene(""))
+        for t in self.tracks:
+            t.clip_slots.insert(i, Slot())
+
+    def delete_scene(self, i):
+        del self.scenes[i]
+        for t in self.tracks:
+            del t.clip_slots[i]
 
     def create_midi_track(self, i):
         self.tracks.insert(i, Track("MIDI"))

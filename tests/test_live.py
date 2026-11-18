@@ -121,7 +121,7 @@ def test_tracks_by_name(song):
 
 def test_transport_sets_what_is_given_and_reports(song):
     r = run(live.transport, song, loop_bars="17-208", position_bar=17, play=True, tempo=126)
-    assert r == {"playing": True, "position_bar": 17.0, "tempo": 126.0, "signature": "4/4", "loop": True,
+    assert r == {"playing": True, "recording": False, "position_bar": 17.0, "tempo": 126.0, "signature": "4/4", "loop": True,
                  "loop_bars": "17-208", "metronome": False}
 
 

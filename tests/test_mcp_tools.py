@@ -15,8 +15,9 @@ class Conn:
     def __init__(self, answer=None, error=None):
         self.sent, self.answer, self.error = [], answer, error
 
-    def send_command(self, name, params=None):
+    def send_command(self, name, params=None, timeout=None):
         self.sent.append((name, params))
+        self.timeout = timeout
         if self.error:
             raise self.error
         return self.answer if self.answer is not None else {"ok": True}

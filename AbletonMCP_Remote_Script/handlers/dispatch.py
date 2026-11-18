@@ -1214,8 +1214,8 @@ def _get_registry():
             "handler": live.load,
             "modifying": True,
         },
-        "live_record_clip": {
-            "handler": live.record_clip,
+        "live_scenes": {
+            "handler": live.scenes,
             "modifying": True,
         },
         "simpler_region": {
@@ -1329,6 +1329,15 @@ def _browser_find(song, p, ctrl):
         if item.is_folder and depth < max_depth:
             stack.extend(("%s.children.%d" % (path, i), it, depth + 1) for i, it in enumerate(item.children))
     return {"matches": found}
+
+
+# Jobs that can outlast the usual 10 s on Live's main thread (a big set, a browser scan, many clips).
+_LONG = ("lom_batch", "live_overview", "live_track", "live_notes_read", "live_notes_write", "live_clips", "live_load")
+
+
+def timeout(command_type):
+    """Seconds the socket thread waits for Live's main thread to finish a command."""
+    return 60.0 if command_type in _LONG else 10.0
 
 
 def is_known(command_type):
