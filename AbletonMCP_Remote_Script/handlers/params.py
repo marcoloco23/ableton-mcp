@@ -14,9 +14,13 @@ _NUMBER = re.compile(r"-?\d+(?:\.\d+)?")
 
 
 def display_number(text):
-    """A shown value as one comparable number: kHz → Hz, s → ms, "-inf dB" → -1e9.
-    Returns None when the text has no number (an on/off or list label)."""
+    """A shown value as one comparable number: kHz → Hz, s → ms, "-inf dB" → -1e9, pan "25L" → -25,
+    "C" → 0, "25R" → 25. Returns None when the text has no number (an on/off or list label)."""
     t = text.strip().lower().replace(",", ".")
+    if t == "c":
+        return 0.0
+    if re.match(r"^\d+(\.\d+)?\s*l$", t):
+        return -float(t[:-1])
     if "inf" in t:
         return -1e9 if "-" in t else 1e9
     m = _NUMBER.search(t)
@@ -65,6 +69,8 @@ def resolve_value(param, value, iterations=40):
     rising = at_hi >= at_lo
     if (target < min(at_lo, at_hi)) or (target > max(at_lo, at_hi)):
         raise ValueError("%s: '%s' is outside %s..%s" % (param.name, value, param.str_for_value(lo), param.str_for_value(hi)))
+    if target in (at_lo, at_hi):  # an end of the range ("-inf dB") is that end exactly, not a hair inside it
+        return lo if target == at_lo else hi
     a, b = lo, hi
     for _ in range(iterations):
         mid = (a + b) / 2.0

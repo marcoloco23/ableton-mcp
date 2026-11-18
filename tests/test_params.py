@@ -53,3 +53,17 @@ def test_errors_name_the_problem():
         params.resolve_value(Param("Freq", hz), 5.85)
     with pytest.raises(ValueError, match="not one of"):
         params.resolve_value(Param("Mode", None, quantized=True, items=["A", "B"], hi=1.0), "C")
+
+
+@pytest.mark.parametrize("text, n", [("C", 0.0), ("25L", -25.0), ("50R", 50.0)])
+def test_pan_reads_left_as_negative(text, n):
+    assert params.display_number(text) == n
+
+
+def test_pan_and_the_ends_of_a_range_are_hit_exactly():
+    pan = Param("Pan", lambda v: "C" if abs(v) < 0.01 else ("%dL" % round(-v * 50) if v < 0 else "%dR" % round(v * 50)),
+                lo=-1.0)
+    assert math.isclose(params.resolve_value(pan, "25L"), -0.5, abs_tol=0.01)
+    assert params.resolve_value(pan, "50R") == 1.0
+    fader = Param("Volume", lambda v: "-inf dB" if v <= 0 else "%.1f dB" % (20 * math.log10(v / 0.5)))
+    assert params.resolve_value(fader, "-inf dB") == 0.0

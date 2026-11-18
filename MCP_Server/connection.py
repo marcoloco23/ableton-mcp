@@ -9,6 +9,10 @@ from typing import Any, Dict
 logger = logging.getLogger("AbletonMCPServer")
 
 
+class AbletonError(Exception):
+    """Live answered, with an error: its message, word for word. The connection stays up."""
+
+
 @dataclass
 class AbletonConnection:
     host: str
@@ -122,11 +126,13 @@ class AbletonConnection:
             logger.info(f"Response parsed, status: {response.get('status', 'unknown')}")
             if response.get("status") == "error":
                 logger.error(f"Ableton error: {response.get('message')}")
-                raise Exception(response.get("message", "Unknown error from Ableton"))
+                raise AbletonError(response.get("message", "Unknown error from Ableton"))
             if is_modifying_command:
                 import time
                 time.sleep(0.1)
             return response.get("result", {})
+        except AbletonError:
+            raise
         except socket.timeout:
             logger.error("Socket timeout while waiting for response from Ableton")
             self.sock = None

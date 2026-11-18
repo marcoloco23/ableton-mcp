@@ -7,7 +7,7 @@ Toggle control surface off/on to pick up changes.
 from __future__ import absolute_import, print_function, unicode_literals
 
 import re
-from . import tracks, browser, devices, arrangement, audio, automation, params
+from . import tracks, browser, devices, arrangement, audio, automation, params, lom, live
 
 
 def _resolve_track(song, track_index, track_type):
@@ -1155,23 +1155,67 @@ def _get_registry():
             "modifying": True,
         },
         "lom_get": {
-            "handler": lambda song, p, ctrl: _lom_get(song, p, ctrl),
+            "handler": lom.lom_get,
             "modifying": True,  # the main thread is the only safe place to read Live
         },
         "lom_set": {
-            "handler": lambda song, p, ctrl: _lom_set(song, p, ctrl),
+            "handler": lom.lom_set,
             "modifying": True,
         },
         "lom_call": {
-            "handler": lambda song, p, ctrl: _lom_call(song, p, ctrl),
+            "handler": lom.lom_call,
             "modifying": True,
         },
         "lom_set_param": {
-            "handler": lambda song, p, ctrl: _lom_set_param(song, p, ctrl),
+            "handler": lom.lom_set_param,
             "modifying": True,
         },
         "lom_batch": {
             "handler": lambda song, p, ctrl: _lom_batch(song, p, ctrl),
+            "modifying": True,
+        },
+        "live_overview": {
+            "handler": live.overview,
+            "modifying": True,
+        },
+        "live_track": {
+            "handler": live.track,
+            "modifying": True,
+        },
+        "live_set": {
+            "handler": live.set_values,
+            "modifying": True,
+        },
+        "live_notes_read": {
+            "handler": live.read_notes,
+            "modifying": True,
+        },
+        "live_notes_write": {
+            "handler": live.write_notes,
+            "modifying": True,
+        },
+        "live_clips": {
+            "handler": live.clips,
+            "modifying": True,
+        },
+        "live_tracks": {
+            "handler": live.tracks,
+            "modifying": True,
+        },
+        "live_transport": {
+            "handler": live.transport,
+            "modifying": True,
+        },
+        "live_locators": {
+            "handler": live.locators,
+            "modifying": True,
+        },
+        "live_load": {
+            "handler": live.load,
+            "modifying": True,
+        },
+        "live_record_clip": {
+            "handler": live.record_clip,
             "modifying": True,
         },
         "simpler_region": {
@@ -1193,103 +1237,21 @@ def _get_registry():
     }
 
 
-def _lom_resolve(song, ctrl, path):
-    """Walk a dotted Live Object Model path: 'tracks.12.devices.0.voices'.
-
-    Starts at the Song; a first part of 'app' starts at the Application.
-    Numbers index a list. Dynamic commands are for anything without its own
-    command, so a Live setting is never out of reach.
-    """
-    parts = path.split(".")
-    obj = song
-    if parts[0] == "app":
-        obj, parts = ctrl.application(), parts[1:]
-    elif parts[0] == "song":
-        parts = parts[1:]
-    for part in parts:
-        obj = obj[int(part)] if part.isdigit() else getattr(obj, part)
-    return obj
-
-
-_NOTE_FIELDS = ("pitch", "start_time", "duration", "velocity", "mute",
-                "probability", "velocity_deviation", "release_velocity")
-
-
-def _lom_plain(value):
-    """Make a Live value JSON-safe: lists stay lists, MIDI notes become dicts, objects their name."""
-    if value is None or isinstance(value, (bool, int, float, str)):
-        return value
-    if hasattr(value, "pitch") and hasattr(value, "start_time"):
-        return dict((f, getattr(value, f)) for f in _NOTE_FIELDS + ("note_id",) if hasattr(value, f))
-    if hasattr(value, "name"):
-        return {"name": str(value.name), "class": type(value).__name__}
-    try:
-        return [_lom_plain(v) for v in value]
-    except TypeError:
-        return str(value)
-
-
-def _lom_get(song, p, ctrl):
-    obj = _lom_resolve(song, ctrl, p["path"])
-    if p.get("list_attrs"):
-        return {"path": p["path"], "class": type(obj).__name__,
-                "attrs": sorted(a for a in dir(obj) if not a.startswith("_"))}
-    return {"path": p["path"], "value": _lom_plain(obj)}
-
-
-def _lom_set(song, p, ctrl):
-    parent, _, attr = p["path"].rpartition(".")
-    obj = _lom_resolve(song, ctrl, parent) if parent else song
-    if attr.isdigit():
-        raise ValueError("lom_set path must end in an attribute name")
-    value = _lom_resolve(song, ctrl, p["value_path"]) if "value_path" in p else p["value"]
-    setattr(obj, attr, value)
-    return {"path": p["path"], "value": _lom_plain(getattr(obj, attr))}
-
-
-def _lom_call(song, p, ctrl):
-    method = _lom_resolve(song, ctrl, p["path"])
-    args = [_lom_arg(song, ctrl, a) for a in p.get("args", [])]
-    return {"path": p["path"], "result": _lom_plain(method(*args))}
-
-
-def _lom_arg(song, ctrl, a):
-    """{"$path": ...} is a Live object; {"$notes": [{pitch, start_time, duration, ...}]} is
-    the tuple of MidiNoteSpecification that clip.add_new_notes takes; anything else as is."""
-    if isinstance(a, dict) and "$path" in a:
-        return _lom_resolve(song, ctrl, a["$path"])
-    if isinstance(a, dict) and "$notes" in a:
-        import Live
-        return tuple(Live.Clip.MidiNoteSpecification(**dict(
-            (k, n[k]) for k in _NOTE_FIELDS if k in n)) for n in a["$notes"])
-    return a
-
-
-def _param_of(song, ctrl, p):
-    """{"path": "<device path>", "param": "Decay Time"} or {"path": "<parameter path>"}."""
-    obj = _lom_resolve(song, ctrl, p["path"])
-    return params.find_parameter(obj, p["param"]) if p.get("param") else obj
-
-
-def _lom_set_param(song, p, ctrl):
-    """Set a parameter by its shown value ("1.80 s", "830 Hz", "-18 dB", "On", "Ping Pong") or a raw number."""
-    param = _param_of(song, ctrl, p)
-    param.value = params.resolve_value(param, p["value"])
-    return {"param": param.name, "value": param.value, "display": param.str_for_value(param.value)}
-
-
 def _lom_batch(song, p, ctrl):
-    """Run many get/set/call/set_param operations in one round trip.
+    """Run many commands in one round trip, in order.
 
-    ops: [{"op": "set_param", "path": ..., "param": ..., "value": ...}, {"op": "get", "path": ...}, ...]
+    ops: [{"op": "get", "path": ...}, {"op": "live_set", "changes": [...]}, ...]: an op is any
+    dispatched command, named in full or without its "lom_" prefix (get, set, call, set_param).
     Stops at the first error unless continue_on_error is true; each result says ok or error.
     """
-    run = {"get": _lom_get, "set": _lom_set, "call": _lom_call, "set_param": _lom_set_param,
-           "simpler_region": _simpler_region}
+    reg = _get_registry()
     results = []
     for op in p.get("ops", []):
         try:
-            results.append({"ok": True, "result": run[op["op"]](song, op, ctrl)})
+            name = op["op"] if op["op"] in reg else "lom_" + op["op"]
+            if name not in reg:
+                raise ValueError("unknown op '%s'" % op["op"])
+            results.append({"ok": True, "result": reg[name]["handler"](song, op, ctrl)})
         except Exception as e:  # report and decide per batch, never half-silently
             results.append({"ok": False, "op": op, "error": str(e)})
             if not p.get("continue_on_error"):
@@ -1300,11 +1262,16 @@ def _lom_batch(song, p, ctrl):
 def _simpler_region(song, p, ctrl):
     """Set what a Simpler shows: the sample region in ms, warp, mode and fades.
 
-    path: the Simpler. start_ms/end_ms move the visible markers (Fade Out acts at
-    the end marker); giving either resets S Start/S Length to 0/100 % so the sample
+    target ("KICK / Simpler") or path: the Simpler. sample: a file to load into it first
+    (Simpler keeps its own Volume). start_ms/end_ms move the visible markers (Fade Out acts
+    at the end marker); giving either resets S Start/S Length to 0/100 % so the sample
     is not shortened a second time, invisibly. mode: classic | one-shot | slicing.
     """
-    dev = _lom_resolve(song, ctrl, p["path"])
+    dev = lom.target(song, p["target"]).device if p.get("target") else lom.resolve(song, ctrl, p["path"])
+    if dev is None or not hasattr(dev, "sample"):
+        raise ValueError("'%s' is not a Simpler" % (p.get("target") or p.get("path")))
+    if p.get("sample"):
+        dev.replace_sample(p["sample"])
     sample = dev.sample
     sr = float(sample.sample_rate)
     if "warp" in p:
@@ -1400,7 +1367,8 @@ _TICK_BEATS = 0.125  # curve resolution of the precomputed values
 
 
 def _automate_param(song, track, name):
-    """'volume', 'pan', 'send A'..'send L', or '<device>.<parameter>' (device by name or index)."""
+    """'volume', 'pan', 'send A'..'send L', or '<device>.<parameter>' (device by name or index).
+    The older lane form; a lane's "target" ("PAD / Auto Filter / Frequency") goes through lom.target."""
     key = name.strip()
     md = track.mixer_device
     if key.lower() == "volume":
@@ -1444,20 +1412,25 @@ def _automate_curve(param, points, shape):
 def _automate(song, p, ctrl):
     """Record a plan of lanes into the arrangement, only over the bars that move.
 
-    lanes: [{"track": "TOP LOOP 2", "param": "Auto Filter.Frequency" | "volume" | "send A",
+    lanes: [{"target": "TOP LOOP 2 / Auto Filter / Frequency" | "PAD / volume" | "PAD / send A",
              "points": [[49, "900 Hz"], [57, "20 kHz"]], "shape": "ease-log"}]
+    (the older {"track": ..., "param": "Auto Filter.Frequency"} form still works)
     Values are what Live shows ("-12 dB", "40 %") or raw numbers. Bars are 1-based.
     Returns at once; automate_status tells progress. Tracks are disarmed while it runs.
     """
     if _AUTOMATE.get("state") == "running":
         raise RuntimeError("automate is already running")
-    names = [t.name for t in song.tracks]
     lanes = []
     for lane in p["lanes"]:
-        track = song.tracks[names.index(lane["track"])]
-        param = _automate_param(song, track, lane["param"])
+        if lane.get("target"):
+            param, name = lom.target(song, lane["target"]).param, lane["target"]
+            if param is None:
+                raise ValueError("'%s' is not a parameter, volume, pan or send" % name)
+        else:
+            param = _automate_param(song, lom.track(song, lane["track"]), lane["param"])
+            name = "%s / %s" % (lane["track"], lane["param"])
         curve = _automate_curve(param, lane["points"], lane.get("shape"))
-        lanes.append({"name": "%s / %s" % (lane["track"], lane["param"]), "param": param, "curve": curve})
+        lanes.append({"name": name, "param": param, "curve": curve})
     # windows: the spans that hold moves, merged when they touch
     spans = sorted((l["curve"][0][0], l["curve"][-1][0]) for l in lanes)
     windows = []

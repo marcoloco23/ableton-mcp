@@ -10,6 +10,7 @@ from mcp.server.fastmcp import FastMCP
 
 from MCP_Server.connection import AbletonConnection
 from MCP_Server.tools import register_all
+from MCP_Server.tools.live import INSTRUCTIONS
 
 logging.basicConfig(
     level=logging.INFO,
@@ -42,7 +43,7 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
 
 
 # Create the MCP server with lifespan support
-mcp = FastMCP("AbletonMCP", lifespan=server_lifespan)
+mcp = FastMCP("AbletonMCP", instructions=INSTRUCTIONS, lifespan=server_lifespan)
 
 
 def get_ableton_connection() -> AbletonConnection:
