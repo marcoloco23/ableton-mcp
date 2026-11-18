@@ -447,7 +447,11 @@ CLIP_ACTIONS = ("duplicate", "move", "delete", "mute", "unmute", "rename", "to_a
 
 def clips(song, p, ctrl):
     """Act on arrangement clips that start in `bars`, or on the session clips in `scene`, on one
-    track or every track: duplicate | move | delete | mute | unmute | rename | to_arrangement."""
+    track or every track: duplicate | move | delete | mute | unmute | rename | to_arrangement.
+
+    to_arrangement fills the arrangement `bars` with the scene's clips, each repeated back to back
+    at its own length; a copy that would run past the bars is left out and reported.
+    """
     action = p.get("action")
     if action not in CLIP_ACTIONS:
         raise ValueError("action is %s, not '%s'" % (", ".join(CLIP_ACTIONS), action))
@@ -457,8 +461,9 @@ def clips(song, p, ctrl):
     if action in ("duplicate", "move") and session:
         raise ValueError("%s works on arrangement clips (give bars); to put session clips in the arrangement use "
                          "to_arrangement" % action)
-    if action == "to_arrangement" and not session:
-        raise ValueError("to_arrangement copies the session clips of a scene: give scene and to_bar")
+    if action == "to_arrangement" and not (session and p.get("bars")):
+        raise ValueError("to_arrangement fills arrangement bars with a scene's clips: give scene and bars, "
+                         "e.g. scene=\"DROP 1\", bars=\"89-112\"")
     if action == "rename" and not p.get("name"):
         raise ValueError("rename needs name")
     if session:
@@ -478,21 +483,31 @@ def clips(song, p, ctrl):
             raise LookupError("no clip starts in bars %s on %s" % (lom.bars_text(song, start, end), where))
         before = [{"track": t.name, "name": c.name, "bars": lom.bars_text(song, c.start_time, c.end_time)}
                   for t, c, _ in chosen]
-    if action in ("duplicate", "move", "to_arrangement"):
+    if action == "to_arrangement":
+        start, end = lom.parse_bars(song, p["bars"])
+        left = []
+        for t, c, _ in chosen:
+            at = start
+            while at + c.length <= end + 1e-6:
+                t.duplicate_clip_to_arrangement(c, at)
+                at += c.length
+            if at < end - 1e-6:
+                left.append({"track": t.name, "name": c.name, "bars": lom.bars_text(song, at, end),
+                             "why": "a %g-beat clip does not fit" % c.length})
+        return dict({"action": action, "clips": before, "to": lom.bars_text(song, start, end)},
+                    **({"left_empty": left} if left else {}))
+    if action in ("duplicate", "move"):
         if p.get("to_bar") is None:
             raise ValueError("%s needs to_bar" % action)
         to, times = lom.beat_of(song, p["to_bar"]), int(p.get("times", 1))
         if times < 1:
             raise ValueError("times is 1 or more")
-        if session:  # a scene's clips go side by side; repeats are the longest clip apart
-            span, offset = max(c.length for _, c, _ in chosen), lambda c: 0.0
-        else:
-            span, offset = end - start, lambda c: c.start_time - start
+        span = end - start
         if action == "move" and (times != 1 or to < end and to + span > start):
             raise ValueError("move goes once, to bars that do not overlap the clips' own")
         for k in range(times):
             for t, c, _ in chosen:
-                t.duplicate_clip_to_arrangement(c, to + k * span + offset(c))
+                t.duplicate_clip_to_arrangement(c, to + k * span + (c.start_time - start))
         if action == "move":
             for t, c, _ in chosen:
                 t.delete_clip(c)

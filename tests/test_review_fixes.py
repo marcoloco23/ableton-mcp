@@ -253,9 +253,14 @@ def test_session_notes_count_bars_from_the_clip(song):
 def test_a_scene_goes_to_the_arrangement_and_session_clips_can_be_deleted(song):
     song.tracks[0].clip_slots[1] = Slot(Clip("mid", 0.0, 16.0))
     song.tracks[1].clip_slots[1] = Slot(Clip("bass", 0.0, 32.0))
-    r = run(live.clips, song, action="to_arrangement", scene="Groove", to_bar=17, times=2)
+    song.tracks[3].clip_slots[1] = Slot(Clip("odd", 0.0, 12.0))
+    r = run(live.clips, song, action="to_arrangement", scene="Groove", bars="17-32")
     assert r["to"] == "17-32"
-    assert [(c.name, c.start_time) for c in song.tracks[0].arrangement_clips] == [("mid", 64.0), ("mid", 96.0)]
+    assert [c.start_time for c in song.tracks[0].arrangement_clips] == [64.0, 80.0, 96.0, 112.0]  # 4 bars each
+    assert [c.start_time for c in song.tracks[1].arrangement_clips[1:]] == [64.0, 96.0]           # 8 bars each
+    assert r["left_empty"] == [{"track": "PAD / STAB", "name": "odd", "bars": "32-32", "why": "a 12-beat clip does not fit"}]
+    with pytest.raises(ValueError, match="give scene and bars"):
+        run(live.clips, song, action="to_arrangement", scene="Groove", to_bar=17)
     with pytest.raises(ValueError, match="use to_arrangement"):
         run(live.clips, song, action="duplicate", scene="Groove", to_bar=1)
     run(live.clips, song, action="delete", scene=2, track="BASS MID")

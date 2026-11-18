@@ -216,15 +216,16 @@ def register(mcp: Any, get_ableton_connection: Callable[[], Any]) -> None:
         the session clips in that scene.
 
         duplicate copies arrangement clips to to_bar, `times` copies back to back (the bars' length apart);
-        move copies once to to_bar and deletes the originals (bars may not overlap); to_arrangement copies
-        a scene's session clips into the arrangement at to_bar, `times` copies the longest clip's length
-        apart; delete; mute / unmute; rename gives each clip `name`. Returns the clips it acted on.
-        Cmd+Z in Live undoes each step.
+        move copies once to to_bar and deletes the originals (bars may not overlap); delete; mute / unmute;
+        rename gives each clip `name`. to_arrangement takes scene and bars: it fills those arrangement bars
+        with the scene's clips, each repeated back to back at its own length (exact, no real-time
+        recording); a copy that would run past the bars is left out and listed. Returns the clips it acted
+        on. Cmd+Z in Live undoes each step.
 
         Examples:
           live_clips("mute", bars="113-176", track="BASS STK")
           live_clips("duplicate", bars="1-8", to_bar=17, times=24)          -> every track's 8-bar loop over 17-208
-          live_clips("to_arrangement", scene="Groove", to_bar=49, times=4)  -> the whole Groove scene, 4 times
+          live_clips("to_arrangement", scene="DROP 1", bars="89-112")      -> the DROP 1 scene over its section
         """
         return out(call("live_clips", action=action, bars=bars, scene=scene, track=track, to_bar=to_bar, times=times,
                         name=name))

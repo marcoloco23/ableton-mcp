@@ -146,7 +146,7 @@ The conventions are stated once, in the server's instructions:
 | `live_set(changes)` | Any number of parameters and track settings by shown value; all checked before any is set, the rest put back if Live refuses one; returns before → after |
 | `live_notes_read(track, bars, scene, as_grid, response_format)` | Notes in bars, from every clip on the track (or the session clip in scene) |
 | `live_notes_write(track, start_bar, bars, notes \| grid, mode, clip_name, scene)` | Replace or add notes in bars; creates the clip when none covers them; all checked before anything changes |
-| `live_clips(action, bars \| scene, track, to_bar, times, name)` | duplicate, move, delete, mute, unmute, rename the arrangement clips that start in bars, or the session clips of a scene; to_arrangement copies a scene into the arrangement |
+| `live_clips(action, bars, scene, track, to_bar, times, name)` | duplicate, move, delete, mute, unmute, rename the arrangement clips that start in bars, or the session clips of a scene; to_arrangement fills arrangement bars with a scene, each clip repeated at its own length |
 | `live_scenes(action, scene, name)` | list, create, rename, fire, delete scenes |
 | `live_tracks(action, track, name, kind)` | create, duplicate, delete, rename |
 | `live_transport(play, position_bar, loop_bars, loop, tempo, metronome, record)` | Check, then set any of them; report the transport |
