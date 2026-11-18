@@ -524,17 +524,28 @@ def clips(song, p, ctrl):
     return {"action": action, "clips": before}
 
 
-def _scenes(song):
-    return [{"scene": k + 1, "name": s.name,
-             "clips": [t.name for t in song.tracks if list(t.clip_slots)[k].has_clip]}
-            for k, s in enumerate(song.scenes)]
+def _slot_clip(song, t, c):
+    """A session clip in detail: its name, length in bars and, for audio, the file and transpose."""
+    out = {"track": t.name, "name": c.name, "length_bars": round(c.length / lom.beats_per_bar(song), 4)}
+    if getattr(c, "is_audio_clip", False):
+        out.update(file=str(c.file_path), pitch_coarse=c.pitch_coarse)
+    return out
+
+
+def _scenes(song, detailed=False):
+    rows = []
+    for k, s in enumerate(song.scenes):
+        filled = [(t, list(t.clip_slots)[k]) for t in song.tracks if list(t.clip_slots)[k].has_clip]
+        rows.append({"scene": k + 1, "name": s.name,
+                     "clips": [_slot_clip(song, t, sl.clip) if detailed else t.name for t, sl in filled]})
+    return rows
 
 
 def scenes(song, p, ctrl):
     """list | create | rename | fire | delete session scenes, by name or number (1 the top one)."""
     action = p.get("action", "list")
     if action == "list":
-        return {"scenes": _scenes(song)}
+        return {"scenes": _scenes(song, detailed=not _concise(p))}
     if action == "create":
         at = list(song.scenes).index(lom.scene(song, p["scene"])) + 1 if p.get("scene") is not None else len(song.scenes)
         song.create_scene(at)

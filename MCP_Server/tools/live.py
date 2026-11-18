@@ -146,7 +146,7 @@ def register(mcp: Any, get_ableton_connection: Callable[[], Any]) -> None:
         return out(call("live_set", changes=changes))
 
     @mcp.tool(annotations=_read("Read MIDI notes in bars"))
-    def live_notes_read(ctx: Context, track: str, bars: str | None = None, scene: str | None = None,
+    def live_notes_read(ctx: Context, track: str, bars: str | None = None, scene: str | int | None = None,
                         as_grid: bool = False, response_format: Format = "concise") -> str:
         """The MIDI notes on a track's arrangement clips, in bars: rows of [bar, beat, pitch, length,
         velocity] (bar song-absolute, beat 1 the downbeat, length in beats), plus the clips they sit in.
@@ -178,7 +178,7 @@ def register(mcp: Any, get_ableton_connection: Callable[[], Any]) -> None:
     def live_notes_write(ctx: Context, track: str, start_bar: int, bars: int,
                          notes: list[list[float] | dict[str, Any]] | None = None, grid: str | None = None,
                          mode: Literal["replace", "add"] = "replace", clip_name: str | None = None,
-                         scene: str | None = None) -> str:
+                         scene: str | int | None = None) -> str:
         """Write MIDI notes into bars start_bar … start_bar+bars-1 of a MIDI track, in one call.
         If no clip covers those bars, a clip is created over exactly them; clips that already cover them
         are written into. A clip covering only part of them is an error naming it (delete or move it with
@@ -209,7 +209,7 @@ def register(mcp: Any, get_ableton_connection: Callable[[], Any]) -> None:
     @mcp.tool(annotations=_write("Edit clips", destructive=True, idempotent=False))
     def live_clips(ctx: Context,
                    action: Literal["duplicate", "move", "delete", "mute", "unmute", "rename", "to_arrangement"],
-                   bars: str | None = None, scene: str | None = None, track: str | None = None,
+                   bars: str | None = None, scene: str | int | None = None, track: str | None = None,
                    to_bar: int | None = None, times: int = 1, name: str | None = None) -> str:
         """Act on clips on one track, or on every track when track is left out. With bars ("49-52",
         inclusive): the arrangement clips that START in those bars. With scene (name, or number from 1):
@@ -232,19 +232,22 @@ def register(mcp: Any, get_ableton_connection: Callable[[], Any]) -> None:
 
     @mcp.tool(annotations=_write("Session scenes", destructive=True, idempotent=False))
     def live_scenes(ctx: Context, action: Literal["list", "create", "rename", "fire", "delete"] = "list",
-                    scene: str | None = None, name: str | None = None) -> str:
+                    scene: str | int | None = None, name: str | None = None,
+                    response_format: Format = "concise") -> str:
         """The session view's scenes, by name or by number as Live shows it (1 is the top scene).
-        list gives each scene's number, name and the tracks with a clip in it; create adds a scene
+        list gives each scene's number, name and the tracks with a clip in it; with "detailed", each
+        clip's name and length in bars and, for audio, its file and pitch_coarse. create adds a scene
         after `scene` (or at the end) named `name`; rename; fire launches it; delete. A session clip's
         notes are live_notes_read / live_notes_write with scene=; copying a scene into the arrangement
         is live_clips("to_arrangement").
 
         Examples:
           live_scenes()
+          live_scenes(response_format="detailed")   -> every slot's clip: name, length, file, transpose
           live_scenes("create", name="Groove")
           live_scenes("fire", scene="Groove")
         """
-        return out(call("live_scenes", action=action, scene=scene, name=name))
+        return out(call("live_scenes", action=action, scene=scene, name=name, response_format=response_format))
 
     @mcp.tool(annotations=_write("Create, duplicate, delete or rename tracks", destructive=True, idempotent=False))
     def live_tracks(ctx: Context, action: Literal["create", "duplicate", "delete", "rename"], track: str | None = None,
@@ -318,7 +321,7 @@ def register(mcp: Any, get_ableton_connection: Callable[[], Any]) -> None:
         return out(call("browser_find", name=name or None, contains=contains or None, roots=roots, limit=limit))
 
     @mcp.tool(annotations=_write("Load a device, plugin or preset", destructive=False, idempotent=False))
-    def live_load(ctx: Context, track: str, item: str, scene: str | None = None, bar: float | None = None,
+    def live_load(ctx: Context, track: str, item: str, scene: str | int | None = None, bar: float | None = None,
                   clip: dict[str, Any] | None = None) -> str:
         """Load something onto a track.
 

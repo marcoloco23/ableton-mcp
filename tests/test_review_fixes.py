@@ -309,3 +309,33 @@ def test_audio_needs_an_audio_track(song, tmp_path):
     wav.write_bytes(b"RIFF")
     with pytest.raises(ValueError, match="'SERUM BASS' is a MIDI track"):
         run(live.load, song, track="SERUM BASS", item=str(wav), scene=1)
+
+
+# numeric scenes reach the tools; slot details in one call -----------------------------------------
+
+def test_a_scene_number_passes_the_tool_input_check():
+    sent = []
+
+    class Conn:
+        def send_command(self, name, params=None, timeout=None):
+            sent.append((name, params))
+            return {}
+
+    m = FastMCP("t")
+    tools.register(m, lambda: Conn())
+    for tool, args in [("live_scenes", {"action": "fire", "scene": 1}), ("live_notes_read", {"track": "BASS", "scene": 2}),
+                       ("live_clips", {"action": "delete", "scene": 1}), ("live_load", {"track": "PERC", "item": "/a.wav", "scene": 1}),
+                       ("live_notes_write", {"track": "BASS", "start_bar": 1, "bars": 1, "notes": [], "scene": 1})]:
+        asyncio.run(m.call_tool(tool, args))
+    assert [p["scene"] for _, p in sent] == [1, 2, 1, 1, 1]
+
+
+def test_detailed_scenes_give_each_slots_clip(song, tmp_path):
+    wav = tmp_path / "perc loop.wav"
+    wav.write_bytes(b"RIFF")
+    run(live.load, song, track="Drums#1", item=str(wav), scene=1, clip={"pitch_coarse": -2})
+    song.tracks[1].clip_slots[0] = Slot(Clip("Bass loop", 0.0, 16.0))
+    r = run(live.scenes, song, response_format="detailed")["scenes"][0]
+    assert r["clips"] == [{"track": "SERUM BASS", "name": "Bass loop", "length_bars": 4.0},
+                          {"track": "Drums", "name": "perc loop", "length_bars": 2.0, "file": str(wav), "pitch_coarse": -2}]
+    assert run(live.scenes, song)["scenes"][0]["clips"] == ["SERUM BASS", "Drums"]

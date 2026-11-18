@@ -146,6 +146,7 @@ class Slot:
 
     def create_audio_clip(self, path):
         self.clip = Clip(path.rsplit("/", 1)[-1].rsplit(".", 1)[0], 0.0, 8.0)
+        self.clip.is_audio_clip, self.clip.file_path = True, path
 
     def delete_clip(self):
         self.clip = None
