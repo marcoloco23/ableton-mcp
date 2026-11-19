@@ -7,6 +7,7 @@ song-absolute; values are what Live shows ("-6 dB", "110 Hz", "High Pass 48dB").
 
 from __future__ import absolute_import, print_function, unicode_literals
 
+import bisect
 import os
 
 from . import lom, params
@@ -766,6 +767,146 @@ def _load_audio(song, t, p):
         where = {"bars": lom.bars_text(song, clip.start_time, clip.end_time)}
     info = dict((k, getattr(clip, k)) for k in ["name", "warping", "pitch_coarse"] + sorted(settings) if hasattr(clip, k))
     return dict({"track": t.name, "loaded": os.path.basename(path), "clip": info}, **where)
+
+
+# --- warping -------------------------------------------------------------------------------
+#
+# Live 12's warp markers, as measured: clip.warp_markers lists the real markers (sample_time in
+# seconds, beat_time in beats), then a shadow marker 1/32 beat after the last real one. The shadow
+# cannot be removed or moved; Live puts it back after whichever real marker is last. A clip keeps at
+# least one real marker: removing the only one does nothing. Markers are addressed by beat_time.
+# move_warp_marker shifts a marker's beat and keeps its sample (dragging it), below beat 0 too.
+
+WARP_TOLERANCE = 1e-3  # seconds and beats: Live keeps marker times at about float precision
+
+
+def _warp_marker(sample_time, beat_time):
+    import Live
+    return Live.Clip.WarpMarker(sample_time=float(sample_time), beat_time=float(beat_time))
+
+
+def _real_markers(clip):
+    """The real warp markers as [(seconds, beat)], the shadow marker left off."""
+    return [(m.sample_time, m.beat_time) for m in list(clip.warp_markers)[:-1]]
+
+
+def _curve(points):
+    """seconds -> beat along the warp through points [(seconds, beat)], its ends extended straight."""
+    pts = sorted(points)
+    at = [s for s, _ in pts]
+
+    def beat_at(s):
+        k = max(1, min(len(pts) - 1, bisect.bisect_right(at, s)))
+        (s1, b1), (s2, b2) = pts[k - 1], pts[k]
+        return b1 + (s - s1) * (b2 - b1) / (s2 - s1)
+    return beat_at
+
+
+def _place(clip, markers, beat_at):
+    """Make the clip's real warp markers exactly `markers` [(seconds, beat)], all on the warp beat_at.
+
+    Only steps Live allows: every old marker but the first is removed; that one is moved onto the new
+    warp (a move keeps its sample); the new markers go in from the last back, so each lands between
+    markers already on the new warp and the shadow is out of the way; the old one is removed last,
+    unless it sits where a new one goes."""
+    real = _real_markers(clip)
+    for _, b in reversed(real[1:]):
+        clip.remove_warp_marker(b)
+    s0, b0 = real[0]
+    if abs(beat_at(s0) - b0) > 1e-9:
+        clip.move_warp_marker(b0, beat_at(s0) - b0)
+    kept = False
+    for s, b in sorted(markers, reverse=True):
+        if abs(s - s0) < 1e-6:
+            kept = True
+        else:
+            clip.add_warp_marker(_warp_marker(s, b))
+    if not kept:
+        clip.remove_warp_marker(min(_real_markers(clip), key=lambda m: abs(m[0] - s0))[1])
+
+
+def _same_markers(got, want):
+    return len(got) == len(want) and all(abs(a - c) < WARP_TOLERANCE and abs(b - d) < WARP_TOLERANCE
+                                         for (a, b), (c, d) in zip(sorted(got), sorted(want)))
+
+
+def _marker_rows(markers):
+    return [[round(s, 4), round(b, 4)] for s, b in markers]
+
+
+def warp(song, p, ctrl):
+    """Warp an audio clip straight: one tempo from its first downbeat, what Clear All Warp Markers,
+    Set 1.1.1 Here, Warp From Here (Straight) and Seg. BPM do by hand. The arrangement clip starting at
+    `bar`, or the session clip in `scene`. first_beat_s (seconds into the file as Live reads it) lands on
+    the clip's start, every later beat 60/bpm seconds apart: two real markers, on the first beat and on
+    the last whole beat in the file. Checked against what Live then shows; if Live refuses a step or puts
+    a marker elsewhere, the old markers are put back."""
+    t = lom.track(song, p["track"])
+    if p.get("scene") is not None and p.get("bar") is not None:
+        raise ValueError("give bar (the arrangement clip starting there) or scene (a session clip), not both")
+    if p.get("scene") is not None:
+        slot, number = _slot(song, t, p["scene"])
+        if not slot.has_clip:
+            raise ValueError("'%s' has no clip in scene %d" % (t.name, number))
+        clip, where = slot.clip, {"scene": number}
+    elif p.get("bar") is not None:
+        beat = lom.beat_of(song, p["bar"])
+        found = [c for c in _clips(t) if abs(c.start_time - beat) < 1e-6]
+        if not found:
+            raise ValueError("no clip on '%s' starts at bar %g; its clips: %s" % (t.name, float(p["bar"]), ", ".join(
+                "'%s' %s" % (c.name, lom.bars_text(song, c.start_time, c.end_time)) for c in _clips(t)) or "none"))
+        clip, where = found[0], {"bar": float(p["bar"])}
+    else:
+        raise ValueError("give bar (the arrangement clip starting there) or scene (a session clip)")
+    if not getattr(clip, "is_audio_clip", False):
+        raise ValueError("'%s' on '%s' is a MIDI clip; only audio clips warp" % (clip.name, t.name))
+    if p.get("bpm") is None:
+        raise ValueError("bpm is needed: the record's tempo, e.g. 126")
+    bpm, first = float(p["bpm"]), float(p.get("first_beat_s") or 0.0)
+    if not 20 <= bpm <= 999:
+        raise ValueError("bpm %g is outside 20-999" % bpm)
+    seconds = clip.sample_length / float(clip.sample_rate)
+    if not 0 <= first < seconds:
+        raise ValueError("first_beat_s %g is outside the file (0-%.3f s)" % (first, seconds))
+    beats = int((seconds - first) * bpm / 60.0)
+    if beats < 1:
+        raise ValueError("the file holds less than one beat at %g BPM after %g s" % (bpm, first))
+    new = [(first, 0.0), (first + beats * 60.0 / bpm, float(beats))]
+
+    was_warping = bool(clip.warping)
+    clip.warping = True  # an unwarped clip is auto-warped by Live here: one real marker and the shadow
+    old = [(m.sample_time, m.beat_time) for m in clip.warp_markers]
+    if len(old) < 2:
+        raise RuntimeError("Live shows %d warp marker(s) on '%s'; a warped clip has a real one and a shadow"
+                           % (len(old), clip.name))
+    try:
+        _place(clip, new, _curve(new))
+        got = _real_markers(clip)
+        if not _same_markers(got, new):
+            raise RuntimeError("Live put the markers at %s, not %s" % (_marker_rows(got), _marker_rows(new)))
+    except Exception as e:
+        try:
+            if not was_warping:
+                clip.warping = False
+                back = "The clip is unwarped again"
+            else:
+                _place(clip, old[:-1], _curve(old))
+                got = _real_markers(clip)
+                back = "The old markers are back" if _same_markers(got, old[:-1]) else (
+                    "Putting the old markers back left them at %s, not %s; Cmd+Z in Live undoes the steps"
+                    % (_marker_rows(got), _marker_rows(old[:-1])))
+        except Exception as e2:
+            back = "Putting the old markers back failed too (%s); Cmd+Z in Live undoes the steps" % str(e2).rstrip(".")
+        raise RuntimeError("Live refused the warp: %s. %s" % (str(e).rstrip("."), back))
+    try:
+        clip.start_marker = clip.loop_start = 0.0
+        clip.end_marker = clip.loop_end = float(beats)
+    except Exception as e:
+        raise RuntimeError("'%s' is warped, but Live refused to set its start to the first beat and its end to "
+                           "beat %d: %s" % (clip.name, beats, e))
+    return dict({"track": t.name, "clip": clip.name, "bpm": bpm, "first_beat_s": first, "beats": beats,
+                 "markers_before": _marker_rows(old[:-1]) if was_warping else "unwarped",
+                 "markers": _marker_rows(_real_markers(clip))}, **where)
 
 
 def load(song, p, ctrl):
