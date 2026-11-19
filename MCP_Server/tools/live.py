@@ -307,9 +307,12 @@ def register(mcp: Any, get_ableton_connection: Callable[[], Any]) -> None:
         result = call("live_locators", action=action, bar=bar, name=name, locator=locator)
         if "pending" not in result:
             return out(result)
-        time.sleep(0.3)
-        listed = call("live_locators", action="list")
-        here = [x for x in listed["locators"] if abs(x["bar"] - result["bar"]) < 1e-6]
+        for _ in range(10):  # Live needs about 4 ticks (move, settle, toggle, name); poll up to 2 s
+            time.sleep(0.2)
+            listed = call("live_locators", action="list")
+            here = [x for x in listed["locators"] if abs(x["bar"] - result["bar"]) < 0.25]
+            if (action == "set") == bool(here) and not (action == "set" and name and here[0]["name"] != name):
+                break
         if (action == "set") != bool(here) or (action == "set" and name and here[0]["name"] != name):
             raise ToolError(f"Live did not {'add' if action == 'set' else 'delete'} the locator at bar "
                             f"{result['bar']:g}; locators now: {listed['locators']}")

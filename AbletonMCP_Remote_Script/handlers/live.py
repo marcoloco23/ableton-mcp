@@ -691,22 +691,40 @@ _LOCATOR_QUEUE = []
 
 
 def _next_locator(song, ctrl):
+    """The sequence the old create_locator proved in Live: move the playhead, wait 2 ticks for it to
+    settle, toggle, wait 2 ticks, then name the cue nearest the target (Live may not place it at
+    exactly the beat asked for). Each step is logged to Live's Log.txt as (AbletonMCP) locator ..."""
     beat, action, name = _LOCATOR_QUEUE[0]
-    song.current_song_time = beat
+    log = getattr(ctrl, "log_message", lambda m: None)
+
+    def done():
+        _LOCATOR_QUEUE.pop(0)
+        if _LOCATOR_QUEUE:
+            _next_locator(song, ctrl)
+
+    def name_it():
+        try:
+            if action == "set":
+                near = min(song.cue_points, key=lambda c: abs(c.time - beat), default=None)
+                if near is not None and abs(near.time - beat) < 1.0:
+                    near.name = name
+                log("locator %s at %s: %s" % (action, beat, [(c.name, c.time) for c in song.cue_points]))
+        except Exception as e:
+            log("locator name error: %s" % e)
+        finally:
+            done()
 
     def toggle():
         try:
+            log("locator toggle at %s (asked %s)" % (song.current_song_time, beat))
             song.set_or_delete_cue()
-            if action == "set":
-                for c in song.cue_points:
-                    if abs(c.time - beat) < 1e-6:
-                        c.name = name
-        finally:
-            _LOCATOR_QUEUE.pop(0)
-            if _LOCATOR_QUEUE:
-                _next_locator(song, ctrl)
+            ctrl.schedule_message(2, name_it)
+        except Exception as e:
+            log("locator toggle error: %s" % e)
+            done()
 
-    ctrl.schedule_message(1, toggle)
+    song.current_song_time = beat
+    ctrl.schedule_message(2, toggle)
 
 
 def locators(song, p, ctrl):
