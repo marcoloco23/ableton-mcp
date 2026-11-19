@@ -684,6 +684,31 @@ def _locators(song):
     return [{"name": c.name, "bar": lom.bar_of(song, c.time)} for c in sorted(song.cue_points, key=lambda c: c.time)]
 
 
+# Live adds or removes a locator at the playhead, and a playhead move lands on the next tick. So the
+# adds and removes of a batch (or of calls close together) run one at a time, in order: move, then on
+# the next tick toggle and name, then the next one. Run together, they all toggled at the last playhead.
+_LOCATOR_QUEUE = []
+
+
+def _next_locator(song, ctrl):
+    beat, action, name = _LOCATOR_QUEUE[0]
+    song.current_song_time = beat
+
+    def toggle():
+        try:
+            song.set_or_delete_cue()
+            if action == "set":
+                for c in song.cue_points:
+                    if abs(c.time - beat) < 1e-6:
+                        c.name = name
+        finally:
+            _LOCATOR_QUEUE.pop(0)
+            if _LOCATOR_QUEUE:
+                _next_locator(song, ctrl)
+
+    ctrl.schedule_message(1, toggle)
+
+
 def locators(song, p, ctrl):
     """list | set | delete. set names the locator at `bar`, or renames `locator`; a new one is
     added on the next tick (Live adds locators at the playhead), so the reply says pending."""
@@ -710,16 +735,9 @@ def locators(song, p, ctrl):
     if song.is_playing:
         raise RuntimeError("Live adds and removes locators at the playhead: stop playback first")
     beat = cue.time if cue is not None else lom.beat_of(song, p["bar"])
-    song.current_song_time = beat
-
-    def toggle():
-        song.set_or_delete_cue()
-        if action == "set":
-            for c in song.cue_points:
-                if abs(c.time - beat) < 1e-6:
-                    c.name = p["name"]
-
-    ctrl.schedule_message(1, toggle)
+    _LOCATOR_QUEUE.append((beat, action, p.get("name")))
+    if len(_LOCATOR_QUEUE) == 1:
+        _next_locator(song, ctrl)
     return {"pending": action, "bar": lom.bar_of(song, beat)}
 
 
