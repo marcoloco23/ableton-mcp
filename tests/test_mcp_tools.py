@@ -35,7 +35,7 @@ def call(m, name, **args):
 
 def test_the_server_offers_only_annotated_live_tools_taught_by_example():
     tools = asyncio.run(server.list_tools())
-    assert len(tools) == 17
+    assert len(tools) == 18
     for t in tools:
         assert t.name.startswith("live_"), t.name
         a = t.annotations
@@ -74,6 +74,14 @@ def test_grid_notes_land_on_the_start_bar():
     assert [n[:3] for n in body["notes"]] == [[65, 1.0, 36], [65, 2.0, 36], [65, 3.0, 36], [65, 4.0, 36]]
     with pytest.raises(ToolError, match="notes or grid"):
         call(tools_with(Conn()), "live_notes_write", track="DRUMS", start_bar=65, bars=1)
+
+
+def test_live_warp_is_destructive_and_forwards_one_command():
+    tool = next(t for t in asyncio.run(server.list_tools()) if t.name == "live_warp")
+    assert tool.annotations.destructiveHint is True and "encoder delay" in tool.description
+    conn = Conn({})
+    call(tools_with(conn), "live_warp", track="REF FULL", bar=1, bpm=126, first_beat_s=0.135)
+    assert conn.sent == [("live_warp", {"track": "REF FULL", "bpm": 126, "first_beat_s": 0.135, "bar": 1})]
 
 
 def test_lom_escape_hatch_maps_to_the_lom_commands():

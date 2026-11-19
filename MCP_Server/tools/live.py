@@ -344,6 +344,30 @@ def register(mcp: Any, get_ableton_connection: Callable[[], Any]) -> None:
         """
         return out(call("live_load", track=track, item=item, scene=scene, bar=bar, clip=clip))
 
+    @mcp.tool(annotations=_write("Warp an audio clip straight", destructive=True, idempotent=True))
+    def live_warp(ctx: Context, track: str, bpm: float, first_beat_s: float = 0.0, bar: float | None = None,
+                  scene: str | int | None = None) -> str:
+        """Warp an audio clip straight at one tempo from its first downbeat: what Clear All Warp Markers,
+        Set 1.1.1 Here, Warp From Here (Straight) and Seg. BPM do by hand. The clip is the arrangement clip
+        that STARTS at bar, or the session clip in scene (name, or number from 1). Every old warp marker
+        goes; first_beat_s lands on beat 0 (the clip's start) and every later beat follows 60/bpm seconds
+        apart: one marker on the first beat, one on the last whole beat in the file. The clip's start is
+        set to the first beat, its end to that last beat. If Live refuses a step or puts a marker elsewhere,
+        the old markers are put back and the error says so. Returns the markers before and after,
+        [seconds, beat] each.
+
+        first_beat_s is seconds into the file AS LIVE READS IT. Live does not skip an MP3's encoder delay
+        when the file has no LAME tag, while Rekordbox grids, soundfile and librosa do: for such an MP3
+        add ffprobe's start_time (e.g. 0.025057 s) to a Rekordbox first-beat time, or the kick lands
+        ~25 ms late.
+
+        Examples:
+          live_warp("REF FULL", bar=1, bpm=126, first_beat_s=0.135)    -> a reference from its Rekordbox grid
+          live_warp("PERC", scene="DROP 1", bpm=124)                     -> a loop that starts on its downbeat
+          live_warp("VOX", bar=97, bpm=122.5, first_beat_s=1.48)         -> an acapella whose first beat is 1.48 s in
+        """
+        return out(call("live_warp", track=track, bpm=bpm, first_beat_s=first_beat_s, bar=bar, scene=scene))
+
     @mcp.tool(annotations=_write("Set up a Simpler", destructive=True, idempotent=True))
     def live_simpler(ctx: Context, simpler: str, sample: str | None = None, start_ms: float | None = None,
                      end_ms: float | None = None, warp: bool | None = None,

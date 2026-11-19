@@ -7,9 +7,16 @@ import types
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "AbletonMCP_Remote_Script"))
 
+class WarpMarker:
+    """Live.Clip.WarpMarker: a warp marker specification, sample_time in seconds."""
+
+    def __init__(self, beat_time=0.0, sample_time=0.0):
+        self.beat_time, self.sample_time = beat_time, sample_time
+
+
 # handlers build notes with Live.Clip.MidiNoteSpecification; this one keeps what it is given.
 _live = types.ModuleType("Live")
-_live.Clip = types.SimpleNamespace(MidiNoteSpecification=lambda **kw: dict(kw))
+_live.Clip = types.SimpleNamespace(MidiNoteSpecification=lambda **kw: dict(kw), WarpMarker=WarpMarker)
 sys.modules.setdefault("Live", _live)
 
 from handlers import live, lom  # noqa: E402,F401
@@ -88,6 +95,90 @@ class Clip:
 
     def add_new_notes(self, specs):
         self.notes += [Note(**s) for s in specs]
+
+
+class AudioClip(Clip):
+    """An audio clip of `seconds` of audio, auto-warped at `tempo` (one real marker at (0 s, beat 0)) or
+    warped with `markers` [(seconds, beat)]. Live 12's warp-marker rules, as measured: warp_markers ends
+    with a shadow marker 1/32 beat after the last real one, which cannot be removed or moved; removing
+    the only real marker does nothing; markers are addressed by beat; a marker added or moved must keep
+    beats rising with samples, its neighbours the shadow included. Error texts are Live's."""
+
+    SHADOW = 1 / 32.0
+
+    def __init__(self, name, start, seconds, tempo=120.0, markers=None, warping=True, sample_rate=44100):
+        self._warping = True
+        Clip.__init__(self, name, start, start + seconds * tempo / 60.0)
+        self.is_audio_clip, self.is_midi_clip = True, False
+        self.sample_rate, self.sample_length, self.tempo = sample_rate, int(seconds * sample_rate), tempo
+        self.real = [list(m) for m in markers] if markers else [[0.0, 0.0]]
+        self._warping, self.calls = warping, []
+
+    @property
+    def warping(self):
+        return self._warping
+
+    @warping.setter
+    def warping(self, on):
+        if on and not self._warping:
+            self.real = [[0.0, 0.0]]  # Live auto-warps a clip when warping is switched on
+        self._warping = on
+
+    def _shadow(self):
+        (s, b), before = self.real[-1], self.real[-2] if len(self.real) > 1 else None
+        spb = (s - before[0]) / (b - before[1]) if before else 60.0 / self.tempo
+        return [s + self.SHADOW * spb, b + self.SHADOW]
+
+    @property
+    def warp_markers(self):
+        return [WarpMarker(beat_time=b, sample_time=s) for s, b in self.real + [self._shadow()]]
+
+    def _at(self, beat):
+        for k, (_, b) in enumerate(self.real):
+            if abs(b - beat) < 1e-9:
+                return k
+        if abs(self._shadow()[1] - beat) < 1e-9:
+            return None
+        raise RuntimeError("The specified warp marker doesn't exist")
+
+    def add_warp_marker(self, m):
+        if not isinstance(m, WarpMarker):
+            raise TypeError("No registered converter was able to produce a C++ rvalue of type NApiHelpers::TWarpMarker "
+                            "from this Python object of type %s" % type(m).__name__)
+        self.calls.append(("add", m.sample_time, m.beat_time))
+        if not self._warping:
+            raise RuntimeError("Cannot add warp marker to an unwarped clip.")
+        s, b = m.sample_time, m.beat_time
+        if not 0 <= s <= self.sample_length / float(self.sample_rate):
+            raise RuntimeError("Warp marker sample time is out of range.")
+        every = sorted(self.real + [self._shadow()])
+        left = [x for x in every if x[0] < s]
+        right = [x for x in every if x[0] > s]
+        if any(abs(x[0] - s) < 1e-9 for x in every):
+            raise RuntimeError("Segment length out of range.")
+        if left and b <= left[-1][1]:
+            raise RuntimeError("Warp marker beat time is ahead of left adjacent marker's beat time.")
+        if right and b >= right[0][1]:
+            raise RuntimeError("Warp marker beat time is behind right adjacent marker's beat time.")
+        self.real = sorted(self.real + [[s, b]])
+
+    def remove_warp_marker(self, beat):
+        self.calls.append(("remove", beat))
+        k = self._at(beat)
+        if k is None:
+            raise RuntimeError("The shadow marker can't be deleted.")
+        if len(self.real) > 1:
+            del self.real[k]
+
+    def move_warp_marker(self, beat, distance):
+        self.calls.append(("move", beat, distance))
+        k = self._at(beat)
+        if k is None:
+            raise RuntimeError("The shadow marker can't be moved.")
+        b = beat + distance
+        if (k > 0 and b <= self.real[k - 1][1]) or (k + 1 < len(self.real) and b >= self.real[k + 1][1]):
+            raise RuntimeError("Segment length out of range.")
+        self.real[k][1] = b
 
 
 class Routing:
