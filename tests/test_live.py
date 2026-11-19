@@ -1,7 +1,7 @@
 """The live_* commands on a fake Live set: whole jobs by name and bar."""
 import pytest
 
-from fake_live import Clip, Ctrl, demo_song, live, lom
+from fake_live import Clip, Ctrl, Track, demo_song, live, lom
 
 
 @pytest.fixture
@@ -119,6 +119,40 @@ def test_tracks_by_name(song):
     assert "BASS MID 2" not in [t.name for t in song.tracks]
 
 
+def drums_group(song):
+    """🥁 DRUMS, a group holding TOP LOOP and KICK, after BASS MID."""
+    group = Track("🥁 DRUMS")
+    group.is_foldable = True
+    children = [Track("TOP LOOP", audio=True), Track("KICK", audio=True)]
+    for t in children:
+        t.is_grouped, t.group_track = True, group
+    song.tracks[1:1] = [group] + children
+    return group
+
+
+def test_create_in_group_lands_after_its_last_track(song):
+    drums_group(song)
+    r = run(live.tracks, song, action="create", kind="audio", in_group="🥁 drums", name="TOP CLAP")
+    assert r == {"action": "create", "track": "TOP CLAP", "kind": "audio", "group": "🥁 DRUMS"}
+    assert [t.name for t in song.tracks[:6]] == ["BASS MID", "🥁 DRUMS", "TOP LOOP", "KICK", "TOP CLAP", "SERUM BASS"]
+    assert "group" not in run(live.tracks, song, action="create", name="LEAD")
+
+
+def test_create_in_group_refuses_what_is_no_group_or_lands_elsewhere(song):
+    drums_group(song)
+    with pytest.raises(ValueError, match="'BASS MID' is not a group track"):
+        run(live.tracks, song, action="create", in_group="BASS MID")
+    with pytest.raises(ValueError, match="not both"):
+        run(live.tracks, song, action="create", in_group="🥁 DRUMS", track="KICK")
+    with pytest.raises(LookupError, match="no track 'DRUMZ'"):
+        run(live.tracks, song, action="create", in_group="DRUMZ")
+    count = len(song.tracks)
+    song._placed = lambda t, i: t  # a Live that keeps the new track out of the group
+    with pytest.raises(RuntimeError, match="outside any group, not in '🥁 DRUMS'; it was deleted again"):
+        run(live.tracks, song, action="create", kind="audio", in_group="🥁 DRUMS", name="TOP CLAP")
+    assert len(song.tracks) == count and "TOP CLAP" not in [t.name for t in song.tracks]
+
+
 def test_transport_sets_what_is_given_and_reports(song):
     r = run(live.transport, song, loop_bars="17-208", position_bar=17, play=True, tempo=126)
     assert r == {"playing": True, "recording": False, "position_bar": 17.0, "tempo": 126.0, "signature": "4/4", "loop": True,
@@ -209,3 +243,41 @@ def test_load_finds_by_name_selects_the_track_and_loads(song):
         live.load(song, {"track": "PAD / STAB", "item": "EQ 8"}, ctrl)
     with pytest.raises(LookupError, match="close: 'EQ Eight', 'EQ Three'"):
         live.load(song, {"track": "PAD / STAB", "item": "EQ"}, ctrl)
+
+
+def packs_browser(loaded=None):
+    """An installed pack as Live 12 shows it: neither folder nor loadable, its Sounds a folder."""
+    from types import SimpleNamespace
+    pack = Item("Electric Keyboards", [Item("Sounds", [Item("Suitcase Piano", [Item("Suitcase Blender.adg")], False),
+                                                       Item("Wurly Piano", [Item("Wurly Smokey.adg")], False)], False)],
+                loadable=False)
+    pack.is_folder = False
+    return SimpleNamespace(packs=Item("Packs", [Item("Core Library", loadable=False), pack]),
+                           audio_effects=Item("Audio Effects", [Item("EQ Eight")]),
+                           load_item=lambda it: loaded.append(it.name))
+
+
+def test_browser_find_opens_packs_and_live_load_takes_the_path(song):
+    from types import SimpleNamespace
+    loaded = []
+    ctrl = SimpleNamespace(application=lambda: SimpleNamespace(browser=browser))
+    browser = packs_browser(loaded)
+    r = live.browser_find(song, {"contains": "suitcase"}, ctrl)
+    assert [(m["path"], m["name"]) for m in r["matches"]] == [
+        ("app.browser.packs.children.1.children.0.children.0", "Suitcase Piano"),
+        ("app.browser.packs.children.1.children.0.children.0.children.0", "Suitcase Blender.adg")]
+    assert r["searched"] == 8 and r["seconds"] >= 0 and "stopped" not in r
+    wurly = live.browser_find(song, {"name": "Wurly Smokey.adg", "roots": ["packs"]}, ctrl)["matches"][0]
+    song.view = SimpleNamespace(selected_track=None)
+    assert live.load(song, {"track": "PAD / STAB", "item": wurly["path"]}, ctrl)["loaded"] == "Wurly Smokey.adg"
+    assert loaded == ["Wurly Smokey.adg"]
+    with pytest.raises(ValueError, match="no browser root 'pack'; roots: plugins"):
+        live.browser_find(song, {"contains": "x", "roots": ["pack"]}, ctrl)
+
+
+def test_browser_find_stops_on_time_and_says_so(song, monkeypatch):
+    from types import SimpleNamespace
+    browser = packs_browser()
+    monkeypatch.setattr(live, "FIND_SECONDS", -1.0)
+    r = live.browser_find(song, {"contains": "wurly"}, SimpleNamespace(application=lambda: SimpleNamespace(browser=browser)))
+    assert r["matches"] == [] and r["searched"] == 1 and r["stopped"].startswith("after -1 s")

@@ -8,7 +8,9 @@ song-absolute; values are what Live shows ("-6 dB", "110 Hz", "High Pass 48dB").
 from __future__ import absolute_import, print_function, unicode_literals
 
 import bisect
+import collections
 import os
+import time
 
 from . import lom, params
 from .browser import select_track
@@ -576,22 +578,55 @@ def scenes(song, p, ctrl):
     return {"action": action, "scene": number, "scenes": _scenes(song)}
 
 
+def _in(t, group):
+    """Whether t sits in group, directly or in a group inside it."""
+    while getattr(t, "is_grouped", False):
+        t = t.group_track
+        if t == group:
+            return True
+    return False
+
+
+def _group(t):
+    return {"group": t.group_track.name} if getattr(t, "is_grouped", False) else {}
+
+
 def tracks(song, p, ctrl):
-    """create | duplicate | delete | rename tracks, by name."""
+    """create | duplicate | delete | rename tracks, by name.
+
+    Live's API cannot group tracks, but a track created right after a group's last track lands in
+    that group: create with in_group does that, then checks Live put it there; if not, the new track
+    is deleted again and the error says where it went."""
     action, name = p.get("action"), p.get("name")
     if action == "create":
-        kind = p.get("kind", "midi")
+        kind, group = p.get("kind", "midi"), None
         if kind == "return":
+            if p.get("in_group"):
+                raise ValueError("a return track cannot go in a group")
             song.create_return_track()
             new = list(song.return_tracks)[-1]
         else:
             ts = list(song.tracks)
-            at = ts.index(lom.track(song, p["track"])) + 1 if p.get("track") else len(ts)
+            if p.get("in_group"):
+                if p.get("track"):
+                    raise ValueError("give track (create after it) or in_group (create as its last track), not both")
+                group = lom.find(ts, p["in_group"], "track")
+                if not getattr(group, "is_foldable", False):
+                    raise ValueError("'%s' is not a group track" % group.name)
+                at = ts.index(group) + 1
+                while at < len(ts) and _in(ts[at], group):
+                    at += 1
+            else:
+                at = ts.index(lom.track(song, p["track"])) + 1 if p.get("track") else len(ts)
             {"midi": song.create_midi_track, "audio": song.create_audio_track}[kind](at)
             new = list(song.tracks)[at]
+            if group is not None and not (getattr(new, "is_grouped", False) and new.group_track == group):
+                where = "in '%s'" % new.group_track.name if getattr(new, "is_grouped", False) else "outside any group"
+                song.delete_track(at)
+                raise RuntimeError("Live put the new track %s, not in '%s'; it was deleted again" % (where, group.name))
         if name:
             new.name = name
-        return {"action": action, "track": new.name, "kind": kind}
+        return dict({"action": action, "track": new.name, "kind": kind}, **_group(new))
     t = lom.track(song, p["track"])
     if action == "duplicate":
         ts = list(song.tracks)
@@ -599,7 +634,7 @@ def tracks(song, p, ctrl):
         new = list(song.tracks)[ts.index(t) + 1]
         if name:
             new.name = name
-        return {"action": action, "from": t.name, "track": new.name}
+        return dict({"action": action, "from": t.name, "track": new.name}, **_group(new))
     if action == "rename":
         if not name:
             raise ValueError("rename needs name")
@@ -700,6 +735,51 @@ def locators(song, p, ctrl):
 
 LOAD_ROOTS = ("audio_effects", "instruments", "midi_effects", "plugins", "drums", "user_folders", "packs")
 LOAD_DEPTH, LOAD_ITEMS = 4, 5000  # devices and plugins sit 2-3 deep; this keeps the scan to a second or two
+FIND_ROOTS = ("plugins", "audio_effects", "instruments", "midi_effects", "user_folders", "packs")
+FIND_DEPTH, FIND_SECONDS = 6, 4.0  # a pack's presets sit 4 deep (pack, Sounds, Suitcase Piano, preset)
+
+
+def _walk(browser, roots, depth):
+    """(path, item) for the browser items under roots, breadth-first, `depth` levels down; the path is
+    what lom.resolve and live_load take. An item that cannot be loaded is opened even when it says it is
+    no folder: an installed pack does (is_folder False), while its Sounds, Presets, … are folders."""
+    queue = collections.deque()
+    for r in roots:
+        top = getattr(browser, r, None)
+        if top is not None:
+            base = "app.browser.%s" % r if r == "user_folders" else "app.browser.%s.children" % r
+            queue.extend(("%s.%d" % (base, i), it, 1) for i, it in enumerate(top if r == "user_folders" else top.children))
+    while queue:
+        path, it, d = queue.popleft()
+        yield path, it
+        if d < depth and (it.is_folder or not it.is_loadable):
+            queue.extend(("%s.children.%d" % (path, i), ch, d + 1) for i, ch in enumerate(it.children))
+
+
+def browser_find(song, p, ctrl):
+    """Browser items by exact name or by a case-insensitive part of one, breadth-first under roots,
+    FIND_DEPTH levels down, packs included. Stops at `limit` matches or after FIND_SECONDS, and says
+    how many items it looked at and how long it took."""
+    browser = ctrl.application().browser
+    roots = p.get("roots") or FIND_ROOTS
+    unknown = [r for r in p.get("roots") or () if getattr(browser, r, None) is None]
+    if unknown:
+        raise ValueError("no browser root %s; roots: %s" % (", ".join("'%s'" % r for r in unknown), ", ".join(FIND_ROOTS)))
+    want, part = p.get("name"), (p.get("contains") or "").lower()
+    if not (want or part):
+        raise ValueError("browser_find needs name (exact) or contains (part of a name)")
+    limit, found, seen, began = int(p.get("limit", 10)), [], 0, time.time()
+    for path, it in _walk(browser, roots, int(p.get("depth", FIND_DEPTH))):
+        seen += 1
+        n = str(it.name)
+        if (want and n == want) or (part and part in n.lower()):
+            found.append({"path": path, "name": n, "loadable": bool(it.is_loadable)})
+            if len(found) >= limit:
+                break
+        if time.time() - began > FIND_SECONDS:
+            return {"matches": found, "searched": seen, "seconds": round(time.time() - began, 2),
+                    "stopped": "after %g s; name fewer roots to search the rest" % FIND_SECONDS}
+    return {"matches": found, "searched": seen, "seconds": round(time.time() - began, 2)}
 
 
 def _browser_item(ctrl, item):
@@ -707,23 +787,16 @@ def _browser_item(ctrl, item):
     live_browser_find gave."""
     if item.startswith("app.browser"):
         return lom.resolve(None, ctrl, item)
-    browser = ctrl.application().browser
-    stack, near = [], []
-    for r in LOAD_ROOTS:
-        top = getattr(browser, r, None)
-        if top is not None:
-            stack.extend((it, 1) for it in (top if r == "user_folders" else top.children))
-    want, seen = lom._norm(item).lower(), 0
-    while stack and seen < LOAD_ITEMS:
-        it, depth = stack.pop(0)
+    want, seen, near = lom._norm(item).lower(), 0, []
+    for _, it in _walk(ctrl.application().browser, LOAD_ROOTS, LOAD_DEPTH):
+        if seen >= LOAD_ITEMS:
+            break
         seen += 1
         n = str(it.name)
         if lom._norm(n).lower() == want and it.is_loadable:
             return it
         if want in n.lower() and it.is_loadable and len(near) < 8:
             near.append(n)
-        if it.is_folder and depth < LOAD_DEPTH:
-            stack.extend((ch, depth + 1) for ch in it.children)
     raise LookupError("no loadable browser item '%s' in the first %d items, %d folders deep%s; live_browser_find "
                       "searches deeper by part of a name, and its path loads anything" % (
                           item, seen, LOAD_DEPTH, "; close: %s" % ", ".join("'%s'" % x for x in near) if near else ""))
