@@ -157,7 +157,8 @@ class _Named(object):
 def _prepare(song, change, earlier):
     """Check one change without applying it: (before, apply, undo, after).
 
-    ``earlier`` holds the (track, setting) pairs earlier changes in the same call set: a
+    ``earlier`` holds the (track, setting) pairs earlier changes in the same call set (tracks compared
+    with ==: Live hands out a new wrapper for the same track on every read, so id() differs): a
     routing channel after its routing type is looked up when it is applied, among the
     channels the new type offers.
     """
@@ -200,7 +201,8 @@ def _prepare(song, change, earlier):
                 lambda: setattr(t, "current_monitoring_state", old), read)
     attr = lom.ROUTING[s]
     pick = lambda: lom.find(getattr(t, "available_%ss" % attr), str(value), "%s option" % s, " of '%s'" % t.name)
-    option = None if (s.endswith(" channel") and (id(t), s.split()[0]) in earlier) else pick()
+    later = s.endswith(" channel") and any(tr == t and st == s.split()[0] for tr, st in earlier)
+    option = None if later else pick()
     old = getattr(t, attr)
     read = lambda: _route(t, attr)
     return (_route(t, attr), lambda: setattr(t, attr, option or pick()), lambda: setattr(t, attr, old), read)
@@ -209,12 +211,12 @@ def _prepare(song, change, earlier):
 def set_values(song, p, ctrl):
     """Apply every change or none. Each target and value is checked before the first is set; if Live
     still refuses one, the changes already made are put back from their recorded before-values."""
-    prepared, errors, earlier = [], [], set()
+    prepared, errors, earlier = [], [], []
     for k, change in enumerate(p.get("changes") or []):
         try:
             prepared.append((change["target"], _prepare(song, change, earlier)))
             tg = lom.target(song, change["target"])
-            earlier.add((id(tg.track), tg.setting))
+            earlier.append((tg.track, tg.setting))
         except Exception as e:
             errors.append("change %d (%s): %s" % (k + 1, change.get("target") if isinstance(change, dict) else change, e))
     if errors:
@@ -521,7 +523,10 @@ def clips(song, p, ctrl):
             c.muted = action == "mute"
         else:
             c.name = p["name"]
-    return {"action": action, "clips": before}
+    if action == "delete":
+        return {"action": action, "clips": before}
+    return {"action": action, "clips": [dict(row, name=c.name, **({"muted": bool(c.muted)} if action != "rename" else {}))
+                                        for row, (t, c, _) in zip(before, chosen)]}
 
 
 def _slot_clip(song, t, c):
@@ -638,8 +643,10 @@ def transport(song, p, ctrl):
         todo.append(lambda: (song.start_playing if play else song.stop_playing)())
     for step in todo:
         step()
+    # Live moves the playhead on its next tick, so a position just set is reported as set
+    position = float(p["position_bar"]) if p.get("position_bar") is not None else lom.bar_of(song, song.current_song_time)
     return {"playing": bool(song.is_playing), "recording": bool(song.record_mode),
-            "position_bar": lom.bar_of(song, song.current_song_time),
+            "position_bar": position,
             "tempo": song.tempo, "signature": "%d/%d" % (song.signature_numerator, song.signature_denominator),
             "loop": bool(song.loop), "loop_bars": lom.bars_text(song, song.loop_start, song.loop_start + song.loop_length),
             "metronome": bool(song.metronome)}

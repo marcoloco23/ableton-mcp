@@ -132,7 +132,7 @@ The conventions are stated once, in the server's instructions:
   `output channel`, `input`, `input channel`, `monitor`). Racks: `"DRUMS / Drum Rack / Kick / Simpler / Decay"`.
   The master is `Master`. A name matches exactly, then ignoring case; `"EQ Eight#2"` picks the second of two.
   A miss lists the names there are and the close ones.
-- **Bars are 1-based and song-absolute**, ranges inclusive (`"49-52"`). Notes are
+- **Bars are 1-based and song-absolute**, ranges inclusive (`"49-52"`); a span off the bar lines shows positions, 2 decimals, end exclusive (`"97-97.07"`). Notes are
   `[bar, beat, pitch, length, velocity]`, beat 1 the downbeat, length in beats. A looped clip reads
   unrolled; writes go into its own notes, never its repeats.
 - **Session view by scene**: name or number (1 is the top scene). With `scene=`, the notes tools read and

@@ -21,6 +21,7 @@ INSTRUCTIONS = """Ableton Live, the set that is open right now. Conventions ever
   input, input channel, monitor). Return tracks by name, the master as "Master". Racks: "DRUMS / Drum Rack / Kick / Simpler / Decay".
   Names match exactly, then ignoring case; "EQ Eight#2" is the second of two with one name. A miss lists the names there are.
 - Bars are 1-based and song-absolute (bar 1 starts at the song's start), ranges inclusive: "49-52" is four bars.
+  A span that does not start and end on bar lines is shown as positions, 2 decimals, end exclusive: "97-97.07".
   Notes are [bar, beat, pitch, length, velocity]: beat 1 is the downbeat, 2.5 the eighth after beat 2, a 16th step s is beat 1 + s/4; length is in beats.
 - Values are what Live shows: "-6 dB", "-inf dB", "110 Hz", "4.5 kHz", "1.80 s", "40 %", "25L", "C", "High Pass 48dB", "On".
   A bare number is Live's raw value; prefer the shown text.

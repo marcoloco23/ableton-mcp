@@ -202,8 +202,12 @@ def bar_of(song, beat):
 
 
 def bars_text(song, start, end):
-    """[start, end) in beats as Live's bars, last bar inclusive: 17-24."""
-    return "%g-%g" % (bar_of(song, start), bar_of(song, end) - 1)
+    """[start, end) in beats as text. On bar lines: whole bars, the last one inclusive ("33-34" is two
+    bars). Otherwise the start and end positions in bars, 2 decimals, end exclusive ("97-97.07")."""
+    a, b = bar_of(song, start), bar_of(song, end)
+    if abs(a - round(a)) < 1e-6 and abs(b - round(b)) < 1e-6 and b - a >= 1 - 1e-6:
+        return "%d-%d" % (round(a), round(b) - 1)
+    return "%g-%g" % (round(a, 2), round(b, 2))
 
 
 def parse_bars(song, bars):

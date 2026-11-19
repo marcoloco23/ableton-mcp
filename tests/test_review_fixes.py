@@ -339,3 +339,81 @@ def test_detailed_scenes_give_each_slots_clip(song, tmp_path):
     assert r["clips"] == [{"track": "SERUM BASS", "name": "Bass loop", "length_bars": 4.0},
                           {"track": "Drums", "name": "perc loop", "length_bars": 2.0, "file": str(wav), "pitch_coarse": -2}]
     assert run(live.scenes, song)["scenes"][0]["clips"] == ["SERUM BASS", "Drums"]
+
+
+# fixes from the first run against real Live (Live 12.4) ---------------------------------------------
+
+class Wrapped:
+    """What Live hands back for a track: a new wrapper on every read, equal (==) to the others."""
+
+    def __init__(self, inner):
+        object.__setattr__(self, "inner", inner)
+
+    def __getattr__(self, k):
+        return getattr(self.inner, k)
+
+    def __setattr__(self, k, v):
+        setattr(self.inner, k, v)
+
+    def __eq__(self, other):
+        return isinstance(other, Wrapped) and other.inner is self.inner
+
+    __hash__ = None
+
+
+def test_input_then_its_channel_with_fresh_track_wrappers_like_live(song):
+    class Routed(Track):
+        @property
+        def available_input_routing_channels(self):
+            return [Routing(n) for n in {"Ext. In": [], "SUB": ["Pre FX", "Post FX"]}[self.input_routing_type.display_name]]
+
+        @available_input_routing_channels.setter
+        def available_input_routing_channels(self, v):
+            pass
+
+    t = Routed("T AUDIO", audio=True)
+    t.available_input_routing_types = [Routing("Ext. In"), Routing("SUB")]
+    t.input_routing_type, t.input_routing_channel = t.available_input_routing_types[0], None
+    inner = song.tracks + [t]
+    type(song).tracks = property(lambda self: [Wrapped(x) for x in inner], lambda self, v: None)
+    try:
+        r = run(live.set_values, song, changes=[{"target": "T AUDIO / input", "value": "SUB"},
+                                                {"target": "T AUDIO / input channel", "value": "Post FX"}])
+    finally:
+        del type(song).tracks
+    assert [c["after"] for c in r["changed"]] == ["SUB", "Post FX"]
+    assert t.input_routing_channel.display_name == "Post FX"
+
+
+def test_transport_reports_the_position_it_was_given(song):
+    class Lagging(type(song)):
+        @property
+        def current_song_time(self):
+            return self.__dict__.get("_shown", 0.0)
+
+        @current_song_time.setter
+        def current_song_time(self, v):
+            self.__dict__.setdefault("_shown", 288.0)  # Live applies it on its next tick
+
+    song.__class__ = Lagging
+    assert run(live.transport, song, position_bar=17)["position_bar"] == 17.0
+
+
+@pytest.mark.parametrize("start, end, text", [(128.0, 136.0, "33-34"), (384.0, 384.2708, "97-97.07"),
+                                              (287.966, 288.0, "72.99-73"), (256.0, 287.966, "65-72.99"),
+                                              (0.0, 4.0, "1-1")])
+def test_one_rule_for_spans(song, start, end, text):
+    assert lom.bars_text(song, start, end) == text
+
+
+def test_a_one_shot_and_a_section_ending_off_the_bar_line(song, tmp_path):
+    song.tracks[4].arrangement_clips = [Clip("hit", 384.0, 384.2708)]
+    assert run(live.track, song, track="Drums#1")["clips"] == "97-97.07"
+    o = run(live.overview, song)
+    assert [s["bars"] for s in o["sections"]] == ["1-16", "17-48", "49-97.07"]
+
+
+def test_rename_answers_with_the_new_name(song):
+    r = run(live.clips, song, action="rename", track="SERUM BASS", bars="49", name="Bass B")
+    assert r["clips"] == [{"track": "SERUM BASS", "name": "Bass B", "bars": "49-52"}]
+    assert run(live.clips, song, action="mute", track="SERUM BASS", bars="49")["clips"][0]["muted"] is True
