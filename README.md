@@ -121,17 +121,45 @@ uvx ableton-mcp
 
 Once the config file has been set on Claude, and the remote script is running in Ableton, you will see a hammer icon with tools for the Ableton MCP.
 
-## Capabilities
+## Tools
 
-- Get session and track information
-- Create and modify MIDI and audio tracks
-- Create, edit, and trigger clips
-- Control playback
-- Load instruments and effects from Ableton's browser
-- Add notes to MIDI clips
-- Change tempo and other session parameters
-- Set track input/output routing (incl. **Resampling**) and monitoring state
-- Capture the master output to disk for offline loudness analysis (resampling record)
+Seventeen `live_*` tools, each a whole job in one round trip (`MCP_Server/tools/live.py`; each runs
+inside Live as the socket command of the same name, `AbletonMCP_Remote_Script/handlers/live.py`).
+The conventions are stated once, in the server's instructions:
+
+- **Named, never numbered.** A target is `"Track / Device / Param"` (`"BASS MID / EQ Eight / 1 Frequency A"`)
+  or `"Track / <setting>"` (`volume`, `pan`, `send A` or `send A-Reverb`, `mute`, `solo`, `arm`, `output`,
+  `output channel`, `input`, `input channel`, `monitor`). Racks: `"DRUMS / Drum Rack / Kick / Simpler / Decay"`.
+  The master is `Master`. A name matches exactly, then ignoring case; `"EQ Eight#2"` picks the second of two.
+  A miss lists the names there are and the close ones.
+- **Bars are 1-based and song-absolute**, ranges inclusive (`"49-52"`); a span off the bar lines shows positions, 2 decimals, end exclusive (`"97-97.07"`). Notes are
+  `[bar, beat, pitch, length, velocity]`, beat 1 the downbeat, length in beats. A looped clip reads
+  unrolled; writes go into its own notes, never its repeats.
+- **Session view by scene**: name or number (1 is the top scene). With `scene=`, the notes tools read and
+  write that slot's clip, bars counted from the clip's start.
+- **Values are what Live shows**: `"-6 dB"`, `"-inf dB"`, `"110 Hz"`, `"25L"`, `"High Pass 48dB"`, `"On"`.
+
+| Tool | Job |
+|------|-----|
+| `live_overview(response_format)` | The whole set: sections from the locators with what plays in each, every track (group, flags, volume, output, devices, clip bars), returns, master |
+| `live_track(track, response_format)` | One track, or one device on it (`"SERUM BASS / Saturator"`): mixer, sends, routing, every parameter as shown, clips |
+| `live_set(changes)` | Any number of parameters and track settings by shown value; all checked before any is set, the rest put back if Live refuses one; returns before → after |
+| `live_notes_read(track, bars, scene, as_grid, response_format)` | Notes in bars, from every clip on the track (or the session clip in scene) |
+| `live_notes_write(track, start_bar, bars, notes \| grid, mode, clip_name, scene)` | Replace or add notes in bars; creates the clip when none covers them; all checked before anything changes |
+| `live_clips(action, bars, scene, track, to_bar, times, name)` | duplicate, move, delete, mute, unmute, rename the arrangement clips that start in bars, or the session clips of a scene; to_arrangement fills arrangement bars with a scene, each clip repeated at its own length |
+| `live_scenes(action, scene, name, response_format)` | list, create, rename, fire, delete scenes; detailed list gives each slot clip's name, length in bars and, for audio, file and pitch_coarse |
+| `live_tracks(action, track, name, kind)` | create, duplicate, delete, rename |
+| `live_transport(play, position_bar, loop_bars, loop, tempo, metronome, record)` | Check, then set any of them; report the transport |
+| `live_locators(action, bar, name, locator)` | list, set (add or rename), delete |
+| `live_browser_find(name, contains, roots, limit)` | Search Live's browser inside Live |
+| `live_load(track, item, scene, bar, clip)` | Load a device, plugin, preset or sample by name at the end of the chain; with `scene` or `bar`, an audio file as a new clip in that session slot or at that arrangement bar, its clip properties (`pitch_coarse`, `warping`, `name`, …) set in the same call |
+| `live_simpler(simpler, sample, start_ms, end_ms, …)` | Load a sample into a Simpler and set its region, warp, mode, fades |
+| `live_automate(lanes)` / `live_automate_status()` | Record arrangement automation in real time |
+| `live_lom(op, path, …)` | Escape hatch: get / set / call / batch on Live's object model by path, with names in brackets: `tracks[BASS MID].devices[EQ Eight].parameters`, `tracks[SUB].arrangement_clips[@113]` |
+| `live_reload_handlers()` | Reload the Remote Script after `deploy.sh` |
+
+The older index-based socket commands (`get_device_parameters`, `create_clip`, …) still answer for
+scripts that use them; they no longer have MCP tools. Tests run without Live: `uv run pytest tests`.
 
 ### macwhite additions (handlers/dispatch.py)
 

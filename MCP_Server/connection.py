@@ -9,6 +9,10 @@ from typing import Any, Dict
 logger = logging.getLogger("AbletonMCPServer")
 
 
+class AbletonError(Exception):
+    """Live answered, with an error: its message, word for word. The connection stays up."""
+
+
 @dataclass
 class AbletonConnection:
     host: str
@@ -39,10 +43,10 @@ class AbletonConnection:
             finally:
                 self.sock = None
 
-    def receive_full_response(self, sock: socket.socket, buffer_size: int = 8192) -> bytes:
+    def receive_full_response(self, sock: socket.socket, buffer_size: int = 8192, timeout: float = 15.0) -> bytes:
         """Receive the complete response, potentially in multiple chunks."""
         chunks = []
-        sock.settimeout(15.0)
+        sock.settimeout(timeout)
         try:
             while True:
                 try:
@@ -61,6 +65,8 @@ class AbletonConnection:
                         continue
                 except socket.timeout:
                     logger.warning("Socket timeout during chunked receive")
+                    if not chunks:
+                        raise
                     break
                 except (ConnectionError, BrokenPipeError, ConnectionResetError) as e:
                     logger.error(f"Socket connection error during receive: {str(e)}")
@@ -78,8 +84,8 @@ class AbletonConnection:
                 raise Exception("Incomplete JSON response received")
         raise Exception("No data received")
 
-    def send_command(self, command_type: str, params: Dict[str, Any] = None) -> Dict[str, Any]:
-        """Send a command to Ableton and return the response."""
+    def send_command(self, command_type: str, params: Dict[str, Any] = None, timeout: float = None) -> Dict[str, Any]:
+        """Send a command to Ableton and return the response; wait up to ``timeout`` seconds for it."""
         if not self.sock and not self.connect():
             raise ConnectionError("Not connected to Ableton")
         command = {"type": command_type, "params": params or {}}
@@ -108,6 +114,7 @@ class AbletonConnection:
             "set_return_track_name", "load_on_return_track",
             "switch_to_view", "record_arrangement_clip",
         ]
+        wait = timeout or 15.0  # what receive_full_response always waited
         try:
             logger.info(f"Sending command: {command_type} with params: {params}")
             self.sock.sendall(json.dumps(command).encode("utf-8"))
@@ -115,22 +122,25 @@ class AbletonConnection:
             if is_modifying_command:
                 import time
                 time.sleep(0.1)
-            self.sock.settimeout(15.0 if is_modifying_command else 10.0)
-            response_data = self.receive_full_response(self.sock)
+            self.sock.settimeout(wait)
+            response_data = self.receive_full_response(self.sock, timeout=wait)
             logger.info(f"Received {len(response_data)} bytes of data")
             response = json.loads(response_data.decode("utf-8"))
             logger.info(f"Response parsed, status: {response.get('status', 'unknown')}")
             if response.get("status") == "error":
                 logger.error(f"Ableton error: {response.get('message')}")
-                raise Exception(response.get("message", "Unknown error from Ableton"))
+                raise AbletonError(response.get("message", "Unknown error from Ableton"))
             if is_modifying_command:
                 import time
                 time.sleep(0.1)
             return response.get("result", {})
+        except AbletonError:
+            raise
         except socket.timeout:
             logger.error("Socket timeout while waiting for response from Ableton")
-            self.sock = None
-            raise Exception("Timeout waiting for Ableton response")
+            self.sock = None  # a late reply must not be read as the next command's
+            raise TimeoutError(f"Live did not answer {command_type} within {wait:g} s. It may still be "
+                               "finishing it; read the state before retrying.")
         except (ConnectionError, BrokenPipeError, ConnectionResetError) as e:
             logger.error(f"Socket connection error: {str(e)}")
             self.sock = None
