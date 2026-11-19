@@ -578,15 +578,6 @@ def scenes(song, p, ctrl):
     return {"action": action, "scene": number, "scenes": _scenes(song)}
 
 
-def _in(t, group):
-    """Whether t sits in group, directly or in a group inside it."""
-    while getattr(t, "is_grouped", False):
-        t = t.group_track
-        if t == group:
-            return True
-    return False
-
-
 def _group(t):
     return {"group": t.group_track.name} if getattr(t, "is_grouped", False) else {}
 
@@ -594,9 +585,10 @@ def _group(t):
 def tracks(song, p, ctrl):
     """create | duplicate | delete | rename tracks, by name.
 
-    Live's API cannot group tracks, but a track created right after a group's last track lands in
-    that group: create with in_group does that, then checks Live put it there; if not, the new track
-    is deleted again and the error says where it went."""
+    Live's API cannot group tracks, and a new track joins the group of the track it is inserted
+    before: right after a group's last track it lands outside the group (as seen in Live, 19.11.2026).
+    So create with in_group inserts it just before the group's last track, then checks Live put it
+    there; if not, the new track is deleted again and the error says where it went."""
     action, name = p.get("action"), p.get("name")
     if action == "create":
         kind, group = p.get("kind", "midi"), None
@@ -609,13 +601,12 @@ def tracks(song, p, ctrl):
             ts = list(song.tracks)
             if p.get("in_group"):
                 if p.get("track"):
-                    raise ValueError("give track (create after it) or in_group (create as its last track), not both")
+                    raise ValueError("give track (create after it) or in_group (create in that group), not both")
                 group = lom.find(ts, p["in_group"], "track")
                 if not getattr(group, "is_foldable", False):
                     raise ValueError("'%s' is not a group track" % group.name)
-                at = ts.index(group) + 1
-                while at < len(ts) and _in(ts[at], group):
-                    at += 1
+                inside = [k for k, t in enumerate(ts) if getattr(t, "is_grouped", False) and t.group_track == group]
+                at = inside[-1] if inside else ts.index(group) + 1
             else:
                 at = ts.index(lom.track(song, p["track"])) + 1 if p.get("track") else len(ts)
             {"midi": song.create_midi_track, "audio": song.create_audio_track}[kind](at)
@@ -623,7 +614,8 @@ def tracks(song, p, ctrl):
             if group is not None and not (getattr(new, "is_grouped", False) and new.group_track == group):
                 where = "in '%s'" % new.group_track.name if getattr(new, "is_grouped", False) else "outside any group"
                 song.delete_track(at)
-                raise RuntimeError("Live put the new track %s, not in '%s'; it was deleted again" % (where, group.name))
+                raise RuntimeError("Live put the new track %s, not in '%s'; it was deleted again. Duplicating a "
+                                   "track in the group (live_tracks duplicate) puts the copy there" % (where, group.name))
         if name:
             new.name = name
         return dict({"action": action, "track": new.name, "kind": kind}, **_group(new))
