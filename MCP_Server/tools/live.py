@@ -257,9 +257,10 @@ def register(mcp: Any, get_ableton_connection: Callable[[], Any]) -> None:
         """Create, duplicate, delete or rename a track by name.
 
         create makes a `kind` track named `name`, right after `track` (or at the end); with in_group
-        (a group track's name) instead, as that group's last track, so it can route to the group's bus;
-        Live's API cannot group tracks, so it is created right after the group's last track and checked:
-        if Live put it elsewhere it is deleted again and the error says where. duplicate copies `track`
+        (a group track's name) instead, inside that group, so it can route to the group's bus. Live's API
+        cannot group tracks, and a track created after a group's last track lands outside it, so the new
+        track goes just before the group's last track and is checked: if Live put it elsewhere it is
+        deleted again and the error says where. duplicate copies `track`
         with its devices and clips, the copy named `name`, right after it; delete removes `track`;
         rename names `track` `name`. A created or copied track that sits in a group reports it as group.
         Routing and mixer settings are in live_set.

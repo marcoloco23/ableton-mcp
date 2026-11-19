@@ -288,10 +288,11 @@ class Song:
         self.tracks.insert(i, self._placed(Track("Audio", audio=True), i))
 
     def _placed(self, t, i):
-        """A new track joins the group of the track before it, as TOP CLAP did after TOP LOOP in Live."""
-        before = self.tracks[i - 1] if i > 0 else None
-        if before is not None and before.is_grouped:
-            t.is_grouped, t.group_track = True, before.group_track
+        """As in Live (19.11.2026): a new track joins the group of the track it is inserted before, so
+        one inserted right after a group's last track lands outside the group."""
+        after = self.tracks[i] if i < len(self.tracks) else None
+        if after is not None and after.is_grouped:
+            t.is_grouped, t.group_track = True, after.group_track
         return t
 
     def duplicate_track(self, i):

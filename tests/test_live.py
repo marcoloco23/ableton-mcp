@@ -130,12 +130,28 @@ def drums_group(song):
     return group
 
 
-def test_create_in_group_lands_after_its_last_track(song):
+def test_create_in_group_lands_before_its_last_track(song):
     drums_group(song)
+    assert "group" not in run(live.tracks, song, action="create", track="KICK", name="AFTER KICK")  # what Marc hit
+    run(live.tracks, song, action="delete", track="AFTER KICK")
     r = run(live.tracks, song, action="create", kind="audio", in_group="🥁 drums", name="TOP CLAP")
     assert r == {"action": "create", "track": "TOP CLAP", "kind": "audio", "group": "🥁 DRUMS"}
-    assert [t.name for t in song.tracks[:6]] == ["BASS MID", "🥁 DRUMS", "TOP LOOP", "KICK", "TOP CLAP", "SERUM BASS"]
+    assert [t.name for t in song.tracks[:6]] == ["BASS MID", "🥁 DRUMS", "TOP LOOP", "TOP CLAP", "KICK", "SERUM BASS"]
     assert "group" not in run(live.tracks, song, action="create", name="LEAD")
+
+
+def test_create_in_group_with_one_track_or_a_group_last(song):
+    group = drums_group(song)
+    song.tracks.remove(next(t for t in song.tracks if t.name == "KICK"))
+    assert run(live.tracks, song, action="create", in_group="🥁 DRUMS", name="CLAP")["group"] == "🥁 DRUMS"
+    perc = Track("PERC")
+    perc.is_foldable, perc.is_grouped, perc.group_track = True, True, group
+    shaker = Track("SHAKER", audio=True)
+    shaker.is_grouped, shaker.group_track = True, perc
+    at = [t.name for t in song.tracks].index("TOP LOOP") + 1
+    song.tracks[at:at] = [perc, shaker]  # 🥁 DRUMS: CLAP, TOP LOOP, PERC (a group: SHAKER)
+    assert run(live.tracks, song, action="create", in_group="🥁 DRUMS", name="RIDE")["group"] == "🥁 DRUMS"
+    assert [t.name for t in song.tracks[1:7]] == ["🥁 DRUMS", "CLAP", "TOP LOOP", "RIDE", "PERC", "SHAKER"]
 
 
 def test_create_in_group_refuses_what_is_no_group_or_lands_elsewhere(song):
@@ -148,7 +164,7 @@ def test_create_in_group_refuses_what_is_no_group_or_lands_elsewhere(song):
         run(live.tracks, song, action="create", in_group="DRUMZ")
     count = len(song.tracks)
     song._placed = lambda t, i: t  # a Live that keeps the new track out of the group
-    with pytest.raises(RuntimeError, match="outside any group, not in '🥁 DRUMS'; it was deleted again"):
+    with pytest.raises(RuntimeError, match="outside any group, not in '🥁 DRUMS'; it was deleted again. Dupl"):
         run(live.tracks, song, action="create", kind="audio", in_group="🥁 DRUMS", name="TOP CLAP")
     assert len(song.tracks) == count and "TOP CLAP" not in [t.name for t in song.tracks]
 
