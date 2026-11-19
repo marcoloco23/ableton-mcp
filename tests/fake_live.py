@@ -198,6 +198,7 @@ class Track:
         self.name, self.devices, self.arrangement_clips = name, list(devices), list(clips)
         self.has_audio_input, self.has_midi_input = audio, not audio
         self.is_foldable = self.is_grouped = self.is_frozen = False
+        self.group_track = None
         self.mute = self.solo = self.arm = False
         self.mixer_device = Mixer(sends)
         self.available_output_routing_types = [Routing(n) for n in ("Master", "Sends Only", "🎸 BASS")]
@@ -281,10 +282,17 @@ class Song:
             del t.clip_slots[i]
 
     def create_midi_track(self, i):
-        self.tracks.insert(i, Track("MIDI"))
+        self.tracks.insert(i, self._placed(Track("MIDI"), i))
 
     def create_audio_track(self, i):
-        self.tracks.insert(i, Track("Audio", audio=True))
+        self.tracks.insert(i, self._placed(Track("Audio", audio=True), i))
+
+    def _placed(self, t, i):
+        """A new track joins the group of the track before it, as TOP CLAP did after TOP LOOP in Live."""
+        before = self.tracks[i - 1] if i > 0 else None
+        if before is not None and before.is_grouped:
+            t.is_grouped, t.group_track = True, before.group_track
+        return t
 
     def duplicate_track(self, i):
         t = self.tracks[i]

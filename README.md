@@ -148,10 +148,10 @@ The conventions are stated once, in the server's instructions:
 | `live_notes_write(track, start_bar, bars, notes \| grid, mode, clip_name, scene)` | Replace or add notes in bars; creates the clip when none covers them; all checked before anything changes |
 | `live_clips(action, bars, scene, track, to_bar, times, name)` | duplicate, move, delete, mute, unmute, rename the arrangement clips that start in bars, or the session clips of a scene; to_arrangement fills arrangement bars with a scene, each clip repeated at its own length |
 | `live_scenes(action, scene, name, response_format)` | list, create, rename, fire, delete scenes; detailed list gives each slot clip's name, length in bars and, for audio, file and pitch_coarse |
-| `live_tracks(action, track, name, kind)` | create, duplicate, delete, rename |
+| `live_tracks(action, track, name, kind, in_group)` | create, duplicate, delete, rename; `in_group` creates the track as a group's last track (so it can route to the group's bus), checked, and deleted again if Live put it elsewhere |
 | `live_transport(play, position_bar, loop_bars, loop, tempo, metronome, record)` | Check, then set any of them; report the transport |
 | `live_locators(action, bar, name, locator)` | list, set (add or rename), delete |
-| `live_browser_find(name, contains, roots, limit)` | Search Live's browser inside Live |
+| `live_browser_find(name, contains, roots, limit)` | Search Live's browser inside Live, six levels down, installed packs' presets included; stops after 4 s and says how many items it searched in how long; each match's path loads with `live_load` |
 | `live_load(track, item, scene, bar, clip)` | Load a device, plugin, preset or sample by name at the end of the chain; with `scene` or `bar`, an audio file as a new clip in that session slot or at that arrangement bar, its clip properties (`pitch_coarse`, `warping`, `name`, …) set in the same call |
 | `live_warp(track, bpm, first_beat_s, bar, scene)` | Warp an audio clip straight: every old marker goes, `first_beat_s` (seconds into the file as Live reads it; an MP3 without a LAME tag keeps its encoder delay, so add ffprobe's `start_time` to a Rekordbox time) lands on beat 0, then one tempo; old markers put back if Live refuses |
 | `live_simpler(simpler, sample, start_ms, end_ms, …)` | Load a sample into a Simpler and set its region, warp, mode, fades |

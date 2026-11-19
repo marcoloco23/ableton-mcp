@@ -252,19 +252,25 @@ def register(mcp: Any, get_ableton_connection: Callable[[], Any]) -> None:
 
     @mcp.tool(annotations=_write("Create, duplicate, delete or rename tracks", destructive=True, idempotent=False))
     def live_tracks(ctx: Context, action: Literal["create", "duplicate", "delete", "rename"], track: str | None = None,
-                    name: str | None = None, kind: Literal["midi", "audio", "return"] = "midi") -> str:
+                    name: str | None = None, kind: Literal["midi", "audio", "return"] = "midi",
+                    in_group: str | None = None) -> str:
         """Create, duplicate, delete or rename a track by name.
 
-        create makes a `kind` track named `name`, right after `track` (or at the end); duplicate copies
-        `track` with its devices and clips, the copy named `name`; delete removes `track`; rename names
-        `track` `name`. Routing and mixer settings are in live_set. Live's API cannot group tracks.
+        create makes a `kind` track named `name`, right after `track` (or at the end); with in_group
+        (a group track's name) instead, as that group's last track, so it can route to the group's bus;
+        Live's API cannot group tracks, so it is created right after the group's last track and checked:
+        if Live put it elsewhere it is deleted again and the error says where. duplicate copies `track`
+        with its devices and clips, the copy named `name`, right after it; delete removes `track`;
+        rename names `track` `name`. A created or copied track that sits in a group reports it as group.
+        Routing and mixer settings are in live_set.
 
         Examples:
           live_tracks("duplicate", track="BASS MID", name="BASS MID 2")
           live_tracks("create", kind="audio", track="DRUMS", name="RESAMPLE")
+          live_tracks("create", kind="audio", in_group="🥁 DRUMS", name="TOP CLAP")   -> {"group": "🥁 DRUMS", ...}
           live_tracks("rename", track="Audio 3", name="TOPS")
         """
-        return out(call("live_tracks", action=action, track=track, name=name, kind=kind))
+        return out(call("live_tracks", action=action, track=track, name=name, kind=kind, in_group=in_group))
 
     @mcp.tool(annotations=_write("Transport, tempo and loop", destructive=False, idempotent=True))
     def live_transport(ctx: Context, play: bool | None = None, position_bar: float | None = None,
@@ -312,12 +318,18 @@ def register(mcp: Any, get_ableton_connection: Callable[[], Any]) -> None:
     def live_browser_find(ctx: Context, name: str = "", contains: str = "", roots: list[str] | None = None,
                           limit: int = 10) -> str:
         """Search Live's browser inside Live: by exact name, or by a case-insensitive part of a name.
-        roots: plugins, audio_effects, instruments, midi_effects, user_folders, packs (default all six).
-        Each match gives a path that live_load takes as item.
+        roots: plugins, audio_effects, instruments, midi_effects, user_folders, packs (default all six),
+        searched breadth-first six levels down, which reaches a pack's presets (pack / Sounds / Suitcase
+        Piano / preset). Each match gives a path that live_load takes as item. Stops at `limit` matches
+        or after 4 s, and says how many items it searched and how long it took; naming fewer roots
+        finds deeper things sooner.
 
         Examples:
           live_browser_find(name="Serum 2")
           live_browser_find(contains="tape", roots=["audio_effects", "plugins"])
+          live_browser_find(contains="suitcase", roots=["packs"])
+            -> {"path": "app.browser.packs.children.11.children.2.children.0.children.3", "name": "Suitcase Blender.adg"}
+          then live_load("KEYS", "app.browser.packs.children.11.children.2.children.0.children.3")
         """
         return out(call("browser_find", name=name or None, contains=contains or None, roots=roots, limit=limit))
 
@@ -339,6 +351,7 @@ def register(mcp: Any, get_ableton_connection: Callable[[], Any]) -> None:
 
         Examples:
           live_load("BASS MID", "EQ Eight")
+          live_load("KEYS", "app.browser.packs.children.11.children.2.children.0.children.3")   -> a pack preset, by its path
           live_load("PERC", "/Users/me/Splice/perc_loop_126.wav", scene="DROP 1", clip={"pitch_coarse": -2, "warping": True})
           live_load("VOX", "/Users/me/Stems/vox_chop.wav", bar=97, clip={"name": "Vox chop"})
         """
