@@ -3,6 +3,8 @@ import gzip
 import math
 import os
 import sys
+import time
+from pathlib import Path
 
 import pytest
 
@@ -84,22 +86,53 @@ def pad():
     return t
 
 
+@pytest.fixture(autouse=True)
+def no_real_live(monkeypatch):
+    def refuse(path):
+        raise AssertionError(f"a test tried to open {path} in the real Live")
+    monkeypatch.setattr(S, "_open_in_live", refuse)
+
+
+def journal(prefs, started, last):
+    """Live's undo journal as measured on 21.11.2026: a new one (bands.cfg) when a set opens, its band written
+    with every undo step and a few ms after every save."""
+    undo = prefs / "Live 12.4.16" / "Undo"
+    undo.mkdir(parents=True, exist_ok=True)
+    for name, t in (("bands.cfg", started), ("0.band", last)):
+        (undo / name).write_bytes(b"")
+        os.utime(undo / name, (t, t))
+
+
 @pytest.fixture
 def live_set(tmp_path):
-    """A saved set, Live's undo journal written with it, and a fake Live holding the same set."""
+    """A set opened at 900 s and saved at 1000 s, and a fake Live holding it."""
     def make(envelopes=""):
         path = tmp_path / "Serenity Project" / "Serenity.als"
         path.parent.mkdir(exist_ok=True)
         path.write_bytes(gzip.compress(SET.format(envelopes=envelopes).encode()))
-        band = tmp_path / "prefs" / "Live 12.4.16" / "Undo" / "2.band"
-        band.parent.mkdir(parents=True, exist_ok=True)
-        band.write_bytes(b"")
         os.utime(path, (1000.0, 1000.0))
-        os.utime(band, (1000.004, 1000.004))  # Live writes the journal a few ms after the set when it saves
+        journal(tmp_path / "prefs", 900.0, 1000.004)
         song = Song([pad()], [Track("A-VERB", sends=()), Track("B-DELAY", sends=())])
         song.file_path = str(path)
         return path, tmp_path / "prefs", Conn(song)
     return make
+
+
+def stamp(t):
+    return time.strftime("%Y-%m-%d %H%M%S", time.localtime(t))
+
+
+class Opens:
+    """Live opening a set: it switches to the file, starts a new journal, and its plug-ins record steps."""
+
+    def __init__(self, conn, prefs):
+        self.conn, self.prefs, self.paths = conn, prefs, []
+
+    def __call__(self, path):
+        self.paths.append(path)
+        self.conn.song.file_path = str(path)
+        os.utime(path, (1990.0, 1990.0))  # written just before
+        journal(self.prefs, 2000.0, 2000.4)
 
 
 def lane(path, pointee):
@@ -119,18 +152,20 @@ def test_lanes_land_in_the_saved_set_in_each_controls_own_unit_and_the_original_
         {"target": "PAD / Utility / Gain", "points": [[41, "-inf dB"], [57, "-6 dB"]]},
         {"target": "PAD / send A", "points": [[96.5, "-14 dB"], [96.75, "-6 dB"], [97, "-14 dB"]]},
         {"target": "PAD / Auto Filter / Frequency", "points": [[89, "900 Hz"], [97, "20 kHz"]], "shape": "ease-log"},
-    ], prefs=prefs, now=0)
+    ], prefs=prefs, now=0, opener=Opens(conn, prefs))
     assert [x["target"] for x in r["lanes"]] == ["PAD / Utility / Output", "PAD / send A", "PAD / Auto Filter / Frequency"]
-    assert open(r["backup"], "rb").read() == original and "Backup/Before automate/Serenity [" in r["backup"]
+    assert path.read_bytes() == original and open(r["backup"], "rb").read() == original  # the set itself is untouched
+    assert r["set"] == str(path.with_name(f"Serenity [auto {stamp(0)}].als")) and r["opened"]
+    new = r["set"]
 
-    gain = lane(path, "121")  # Utility's Gain is linear gain in the XML: -inf is 0, -6 dB is 0.501
+    gain = lane(new, "121")  # Utility's Gain is linear gain in the XML: -inf is 0, -6 dB is 0.501
     assert gain[0] == (-63072000.0, "1") and at(gain, 160) == 0.0 and at(gain, 224) == pytest.approx(10 ** (-6 / 20), rel=1e-3)
     assert 10 ** (-40 / 20) < at(gain, 192) < 10 ** (-6 / 20)  # on its way up halfway, not silent until the end
 
-    send = lane(path, "102")  # -6 dB on a send is 0.501 in the XML, never the fader's raw 0.85
+    send = lane(new, "102")  # -6 dB on a send is 0.501 in the XML, never the fader's raw 0.85
     assert at(send, 383) == pytest.approx(10 ** (-6 / 20), rel=1e-3) and at(send, 382) == pytest.approx(10 ** (-14 / 20), rel=1e-3)
 
-    freq = lane(path, "111")
+    freq = lane(new, "111")
     assert at(freq, 352) == pytest.approx(900) and at(freq, 384) == pytest.approx(20000)
     assert at(freq, 368) == pytest.approx(math.sqrt(900 * 20000), rel=0.02)  # ease-log: the middle is the geometric mean
 
@@ -138,7 +173,8 @@ def test_lanes_land_in_the_saved_set_in_each_controls_own_unit_and_the_original_
 def test_what_was_written_reads_back_in_bars_and_shown_values(live_set):
     path, prefs, conn = live_set()
     S.patch(conn, [{"target": "PAD / send A", "points": [[96.5, "-14 dB"], [96.75, "-6 dB"], [97, "-14 dB"]]},
-                   {"target": "PAD / Auto Filter / Frequency", "points": [[89, "900 Hz"], [97, "20 kHz"]]}], prefs=prefs)
+                   {"target": "PAD / Auto Filter / Frequency", "points": [[89, "900 Hz"], [97, "20 kHz"]]}],
+            prefs=prefs, opener=Opens(conn, prefs))
     got = {x["target"]: x for x in S.lanes(conn, "PAD", prefs=prefs)["lanes"]}
     assert got["PAD / send A"]["points"] == [[96.5, "-14.0 dB"], [96.75, "-6.0 dB"], [97.0, "-14.0 dB"]]
     assert got["PAD / Auto Filter / Frequency"]["points"] == [[89.0, "900 Hz"], [97.0, "20.00 kHz"]]
@@ -148,8 +184,9 @@ def test_what_was_written_reads_back_in_bars_and_shown_values(live_set):
 
 def test_an_existing_lane_changes_only_over_the_written_bars(live_set):
     path, prefs, conn = live_set(OLD_SEND_LANE)
-    S.patch(conn, [{"target": "PAD / send A", "points": [[96.5, "-inf dB"], [97, "-inf dB"]]}], prefs=prefs)
-    ev = lane(path, "102")
+    r = S.patch(conn, [{"target": "PAD / send A", "points": [[96.5, "-inf dB"], [97, "-inf dB"]]}], prefs=prefs,
+                open_it=False)
+    ev = lane(r["set"], "102")
     assert at(ev, 100) == pytest.approx(0.5) and at(ev, 470) == pytest.approx(0.15)   # the old lane, before and after
     assert at(ev, 383) == pytest.approx(0.0003162277571)
     assert (382.0, repr(0.5)) in ev and (384.0, repr(0.5)) in ev                      # jumps back at both edges
@@ -158,22 +195,70 @@ def test_an_existing_lane_changes_only_over_the_written_bars(live_set):
 def test_nothing_is_written_while_live_holds_changes_the_file_lacks(live_set):
     path, prefs, conn = live_set()
     original = path.read_bytes()
-    os.utime(prefs / "Live 12.4.16" / "Undo" / "2.band", (1030.0, 1030.0))  # a change 30 s after the save
-    with pytest.raises(S.Refused, match="save the set in Live"):
+    journal(prefs, 900.0, 1030.0)  # a change 30 s after the save
+    with pytest.raises(S.Refused, match=r"changes since Serenity.als was saved at .*Save the set in Live"):
         S.patch(conn, [{"target": "PAD / send A", "points": [[1, "-6 dB"], [2, "-12 dB"]]}], prefs=prefs)
     assert path.read_bytes() == original and not (path.parent / "Backup").exists()
+    assert [p.name for p in path.parent.iterdir()] == ["Serenity.als"]
 
 
-def test_a_save_in_live_during_the_patch_leaves_the_set_alone(live_set, monkeypatch):
+def test_a_set_just_opened_counts_as_changed_because_its_plugins_record_steps_while_loading(live_set):
+    """21.11.2026: the journal of a freshly opened set held "Change Plug-in Parameter List" and "Change \"Program\""
+    steps, Live asked "Save changes?" before switching away from it, and the check said unsaved."""
     path, prefs, conn = live_set()
-    dump = S.dump
+    journal(prefs, 1500.0, 1500.4)  # opened at 1500 s, untouched since
+    with pytest.raises(S.Refused, match="changed since it opened at .* plug-ins record steps while a set loads"):
+        S.patch(conn, [{"target": "PAD / send A", "points": [[1, "-6 dB"], [2, "-12 dB"]]}], prefs=prefs)
+    journal(prefs, 1500.0, 1600.004)
+    os.utime(path, (1600.0, 1600.0))  # saved once in Live
+    assert S.patch(conn, [{"target": "PAD / send A", "points": [[1, "-6 dB"], [2, "-12 dB"]]}], prefs=prefs,
+                   open_it=False)["set"]
+
+
+def test_live_switches_to_the_new_file_and_the_next_write_waits_for_a_save_there(live_set):
+    path, prefs, conn = live_set()
+    opens = Opens(conn, prefs)
+    first = S.patch(conn, [{"target": "PAD / send A", "points": [[1, "-6 dB"], [2, "-12 dB"]]}], prefs=prefs,
+                    now=0, opener=opens)
+    assert opens.paths == [Path(first["set"])] and conn.song.file_path == first["set"]
+    assert "Cmd+S now saves there" in first["next"]
+    with pytest.raises(S.Refused, match="changed since it opened"):
+        S.patch(conn, [{"target": "PAD / send B", "points": [[1, "-6 dB"], [2, "-12 dB"]]}], prefs=prefs, opener=opens)
+    os.utime(first["set"], (2100.0, 2100.0))  # Cmd+S in Live, into the new file
+    journal(prefs, 2000.0, 2100.004)
+    second = S.patch(conn, [{"target": "PAD / send B", "points": [[1, "-6 dB"], [2, "-12 dB"]]}], prefs=prefs,
+                     now=60, opener=opens)
+    assert Path(second["set"]).name == f"Serenity [auto {stamp(60)}].als"  # named after the set, not round one
+    os.utime(second["set"], (2200.0, 2200.0))
+    journal(prefs, 2000.0, 2200.004)  # Live opened round two; Marc saved it
+    lanes = {x["target"] for x in S.lanes(conn, "PAD", prefs=prefs)["lanes"]}
+    assert lanes == {"PAD / send A", "PAD / send B"}  # round two is written onto round one, not onto the old set
+
+
+def test_a_change_while_the_lanes_are_written_leaves_live_where_it_is(live_set, monkeypatch):
+    path, prefs, conn = live_set()
+    opens, dump = Opens(conn, prefs), S.dump
+
+    def marc_edits_meanwhile(root):
+        journal(prefs, 900.0, 1050.0)
+        return dump(root)
+    monkeypatch.setattr(S, "dump", marc_edits_meanwhile)
+    r = S.patch(conn, [{"target": "PAD / send A", "points": [[1, "-6 dB"], [2, "-12 dB"]]}], prefs=prefs, opener=opens)
+    assert opens.paths == [] and not r["opened"] and "left as it is" in r["next"]
+    assert Path(r["set"]).exists() and conn.song.file_path == str(path)
+
+
+def test_a_save_in_live_while_the_lanes_are_written_leaves_live_where_it_is(live_set, monkeypatch):
+    path, prefs, conn = live_set()
+    opens, dump = Opens(conn, prefs), S.dump
 
     def live_saves_meanwhile(root):
         os.utime(path, (1040.0, 1040.0))
+        journal(prefs, 900.0, 1040.004)
         return dump(root)
     monkeypatch.setattr(S, "dump", live_saves_meanwhile)
-    with pytest.raises(S.Refused, match="while the lanes were being written"):
-        S.patch(conn, [{"target": "PAD / send A", "points": [[1, "-6 dB"], [2, "-12 dB"]]}], prefs=prefs)
+    r = S.patch(conn, [{"target": "PAD / send A", "points": [[1, "-6 dB"], [2, "-12 dB"]]}], prefs=prefs, opener=opens)
+    assert opens.paths == [] and "saved the set while the lanes were being written" in r["next"]
     assert S.load(path).find(".//AutomationEnvelope") is None
 
 
@@ -187,27 +272,14 @@ def test_what_it_refuses(live_set, target, why):
 
 def test_only_reads_reach_live(live_set):
     path, prefs, conn = live_set()
-    S.patch(conn, [{"target": "PAD / Utility / Output", "points": [[1, "-inf dB"], [3, "0 dB"]]}], prefs=prefs)
+    S.patch(conn, [{"target": "PAD / Utility / Output", "points": [[1, "-inf dB"], [3, "0 dB"]]}], prefs=prefs,
+            opener=Opens(conn, prefs))
     S.lanes(conn, prefs=prefs)
     ops = [o for name, p in conn.sent for o in p["ops"]]
     assert {name for name, _ in conn.sent} == {"lom_batch"}
     assert all(o["op"] == "get" or o["path"].endswith(".str_for_value") for o in ops)
     with pytest.raises(ValueError, match="reads only"):
         S.Live(conn).batch([{"op": "set", "path": "tempo", "value": 120}])
-
-
-def test_reopen_needs_a_patched_set_and_no_changes_since(live_set):
-    path, prefs, conn = live_set()
-    opened = []
-    with pytest.raises(S.Refused, match="Live's own save"):
-        S.reopen(conn, True, prefs, opened.append)
-    S.patch(conn, [{"target": "PAD / send A", "points": [[1, "-6 dB"], [2, "-12 dB"]]}], prefs=prefs)
-    os.utime(path, (1010.0, 1010.0))
-    assert S.reopen(conn, False, prefs, opened.append)["state"] == "patched" and opened == []
-    assert S.reopen(conn, True, prefs, opened.append)["reopened"] and opened == [path]
-    os.utime(prefs / "Live 12.4.16" / "Undo" / "2.band", (1020.0, 1020.0))  # Marc changed something after the patch
-    with pytest.raises(S.Refused, match="would lose them"):
-        S.reopen(conn, True, prefs, opened.append)
 
 
 def lp(name, lo, hi, ends, now=None, quantized=False, items=()):

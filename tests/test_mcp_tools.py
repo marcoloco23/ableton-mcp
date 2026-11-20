@@ -35,7 +35,7 @@ def call(m, name, **args):
 
 def test_the_server_offers_only_annotated_live_tools_taught_by_example():
     tools = asyncio.run(server.list_tools())
-    assert len(tools) == 20
+    assert len(tools) == 19
     for t in tools:
         assert t.name.startswith("live_"), t.name
         a = t.annotations
@@ -47,7 +47,7 @@ def test_the_server_offers_only_annotated_live_tools_taught_by_example():
 
 @pytest.mark.parametrize("name, read_only", [("live_overview", True), ("live_track", True), ("live_notes_read", True),
                                              ("live_automation", True), ("live_set", False), ("live_notes_write", False),
-                                             ("live_lom", False), ("live_reopen", False)])
+                                             ("live_lom", False)])
 def test_read_tools_say_so(name, read_only):
     tool = next(t for t in asyncio.run(server.list_tools()) if t.name == name)
     assert tool.annotations.readOnlyHint is read_only
@@ -113,19 +113,20 @@ def test_saved_set_jobs_go_to_the_saved_set_and_a_refusal_reads_as_the_tool_erro
     from MCP_Server import saved_set
 
     seen = []
-    monkeypatch.setattr(saved_set, "patch", lambda conn, lanes: seen.append(("patch", lanes)) or {"lanes": []})
+    monkeypatch.setattr(saved_set, "patch", lambda conn, lanes, open_it: seen.append(("patch", lanes, open_it)) or {})
     monkeypatch.setattr(saved_set, "lanes", lambda conn, target: seen.append(("lanes", target)) or {"lanes": []})
-
-    def refuse(conn, confirm):
-        raise saved_set.Refused("Live has changes since the patch")
-    monkeypatch.setattr(saved_set, "reopen", refuse)
     conn = Conn()
     m = tools_with(conn)
     lanes = [{"target": "PAD / send A", "points": [[96, "-6 dB"], [97, "-inf dB"]]}]
     call(m, "live_automate", lanes=lanes, saved=True)
+    call(m, "live_automate", lanes=lanes, saved=True, open_set=False)
     call(m, "live_automation", target="PAD")
-    assert seen == [("patch", lanes), ("lanes", "PAD")] and conn.sent == []  # nothing recorded in Live
-    with pytest.raises(ToolError, match="changes since the patch"):
-        call(m, "live_reopen", confirm=True)
+    assert seen == [("patch", lanes, True), ("patch", lanes, False), ("lanes", "PAD")] and conn.sent == []
+
+    def refuse(conn, lanes, open_it):
+        raise saved_set.Refused("Live counts Serenity.als as changed since it opened")
+    monkeypatch.setattr(saved_set, "patch", refuse)
+    with pytest.raises(ToolError, match="changed since it opened"):
+        call(m, "live_automate", lanes=lanes, saved=True)
     call(m, "live_automate", lanes=lanes)
-    assert conn.sent == [("automate", {"lanes": lanes})]
+    assert conn.sent == [("automate", {"lanes": lanes})]  # the recording route is unchanged

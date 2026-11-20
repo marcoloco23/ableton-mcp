@@ -434,7 +434,7 @@ def register(mcp: Any, get_ableton_connection: Callable[[], Any]) -> None:
                         mode=mode, fade_in=fade_in, fade_out=fade_out, trigger=trigger))
 
     @mcp.tool(annotations=_write("Write arrangement automation", destructive=True, idempotent=True))
-    def live_automate(ctx: Context, lanes: list[Lane], saved: bool = False) -> str:
+    def live_automate(ctx: Context, lanes: list[Lane], saved: bool = False, open_set: bool = True) -> str:
         """Record automation into the arrangement: each lane is a target (a parameter, "Track / pan" or
         "Track / send A"), points [[bar, value], …] with values as Live shows them, and a shape: linear
         (default), ease, or ease-log (for frequencies); a fade from or to "-inf dB" eases the knob's
@@ -453,16 +453,18 @@ def register(mcp: Any, get_ableton_connection: Callable[[], Any]) -> None:
           live_automate([{"target": "TOPS / Utility / Gain", "points": [[96, "0 dB"], [97, "-inf dB"]]}])
           live_automate([{"target": "PAD / volume", "clear": "41-57", "value": "-4 dB"}])   -> a flat line
 
-        saved=True writes the same lanes into the saved set instead, in about three seconds and to the beat:
-        Live's undo journal must show no change since the last save (else nothing is written), the original
-        goes to the project's Backup/Before automate folder, and the XML is checked before it replaces the set.
-        Live hears the lanes after live_reopen. A lane there may also be {"target": ..., "clear": "all"},
-        which removes it. Device parameters inside racks, switches and menus stay with the recording.
+        saved=True writes the same lanes in seconds and to the beat into a copy of the saved set,
+        "<set> [auto <date time>].als" beside it, and opens that copy in Live, which keeps working there (Cmd+S
+        saves into it; the set itself stays as it was, with a copy in Backup/Before automate). Refused unless the
+        set was saved after its last change, as Live's undo journal shows: Live would ask "Save changes?" before
+        switching. A set just opened counts as changed (its plug-ins record steps while loading), so save once
+        first. open_set=False writes the copy without opening it. A lane may also be {"target": ..., "clear": "all"},
+        which removes it. Devices inside racks, switches and menus stay with the recording.
 
           live_automate([{"target": "PAD / Utility / Gain", "points": [[41, "-inf dB"], [57, "-4 dB"]]}], saved=True)
         """
         if saved:
-            return saved_set(lambda S, conn: S.patch(conn, lanes))
+            return saved_set(lambda S, conn: S.patch(conn, lanes, open_it=open_set))
         return out(call("automate", lanes=lanes))
 
     @mcp.tool(annotations=_read("Read arrangement automation"))
@@ -478,16 +480,6 @@ def register(mcp: Any, get_ableton_connection: Callable[[], Any]) -> None:
           live_automation("VOX LEAD / send E")
         """
         return saved_set(lambda S, conn: S.lanes(conn, target))
-
-    @mcp.tool(annotations=_write("Reopen the saved set", destructive=True, idempotent=True))
-    def live_reopen(ctx: Context, confirm: bool = False) -> str:
-        """Open the set again from its file, so Live plays lanes that live_automate(saved=True) wrote. Refused
-        when Live has changes since then (reopening would lose them) or when the file is Live's own save.
-        Without confirm it only says what it would do; Live's undo history starts over after a reopen.
-
-        Example: live_reopen(confirm=True)
-        """
-        return saved_set(lambda S, conn: S.reopen(conn, confirm))
 
     @mcp.tool(annotations=_read("Automation recording progress"))
     def live_automate_status(ctx: Context) -> str:
