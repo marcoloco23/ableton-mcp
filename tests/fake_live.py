@@ -193,8 +193,11 @@ class AudioClip(Clip):
 
 
 class Routing:
-    def __init__(self, name):
-        self.display_name = name
+    """A routing type or channel. attached_object is the track a routing type names (Live 12: an input from
+    another track, a group, a return or the Main), else None (Ext. In, All Ins, No Input, Resampling)."""
+
+    def __init__(self, name, attached_object=None):
+        self.display_name, self.attached_object = name, attached_object
 
 
 class Mixer:
@@ -216,8 +219,10 @@ class Track:
         self.output_routing_type = self.available_output_routing_types[0]
         self.available_input_routing_types = [Routing(n) for n in ("Ext. In", "Resampling")]
         self.input_routing_type = self.available_input_routing_types[0]
+        self.input_routing_channel = Routing("")
         self.available_output_routing_channels = self.available_input_routing_channels = []
-        self.current_monitoring_state = 1
+        self.current_monitoring_state = 1  # 0 In, 1 Auto, 2 Off
+        self.muted_via_solo = False        # Live sets it on every track another track's solo silences
         self.can_be_armed = True
         self.clip_slots = [Slot(), Slot()]
 
@@ -234,6 +239,14 @@ class Track:
 
     def create_audio_clip(self, path, position):
         self.arrangement_clips.append(Clip(path.rsplit("/", 1)[-1].rsplit(".", 1)[0], position, position + 16.0))
+
+
+def take_input(track, source, channel="Post FX", monitor=0):
+    """Route `source` (a Track, or "Resampling") into `track`, as Live's input chooser does: monitor 0 is In."""
+    track.input_routing_type = (Routing("Resampling") if source == "Resampling"
+                                else Routing(source.name, source))
+    track.input_routing_channel = Routing("" if source == "Resampling" else channel)
+    track.current_monitoring_state = monitor
 
 
 class Slot:

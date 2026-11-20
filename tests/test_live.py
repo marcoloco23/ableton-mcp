@@ -1,7 +1,7 @@
 """The live_* commands on a fake Live set: whole jobs by name and bar."""
 import pytest
 
-from fake_live import Clip, Ctrl, Slot, Track, demo_song, live, lom
+from fake_live import Clip, Ctrl, Slot, Track, demo_song, live, lom, take_input
 
 
 @pytest.fixture
@@ -238,6 +238,100 @@ def test_overview_sections_say_what_plays(song):
     assert o["tracks"][0] == {"name": "BASS MID", "kind": "midi", "volume": "0.0 dB", "output": "Master",
                               "devices": ["EQ Eight"], "clips": "17-32"}
     assert run(live.overview, song, response_format="detailed")["tracks"][0]["clips"][1] == {"name": "mid", "bars": "25-32"}
+
+
+# what sounds where: input routing, monitor, mute and solo ------------------------------------
+
+def playing(o):
+    return {s["name"]: s["playing"] for s in o["sections"]}
+
+
+def test_a_track_playing_anothers_clips_through_its_input_plays_where_they_play(song):
+    """20.11.2026: BASS MID played SUB's MIDI (input SUB / Post FX, monitor In) with no clip of its own,
+    and the overview said it played nowhere."""
+    bass_mid, serum = song.tracks[0], song.tracks[1]
+    take_input(bass_mid, serum)
+    o = run(live.overview, song)
+    assert o["tracks"][0] == {"name": "BASS MID", "kind": "midi", "volume": "0.0 dB", "output": "Master",
+                              "devices": ["EQ Eight"], "plays_via": "SERUM BASS", "input": "SERUM BASS / Post FX",
+                              "monitor": "In"}
+    assert playing(o) == {"START": [], "INTRO": [], "GROOVE A": ["BASS MID", "SERUM BASS"]}
+    assert "warning" not in o and "silenced_by_solo" not in o["sections"][0]
+
+
+def test_monitor_in_suppresses_the_tracks_own_clips(song):
+    take_input(song.tracks[0], song.tracks[1])
+    song.tracks[0].arrangement_clips = [Clip("mid", 64.0, 96.0)]
+    assert playing(run(live.overview, song))["INTRO"] == []
+
+
+def test_auto_hears_the_input_only_while_armed_and_the_clips_too(song):
+    bass_mid = song.tracks[0]
+    take_input(bass_mid, song.tracks[1], monitor=1)
+    bass_mid.arrangement_clips = [Clip("mid", 64.0, 96.0)]
+    o = run(live.overview, song)
+    assert "plays_via" not in o["tracks"][0]
+    assert playing(o) == {"START": [], "INTRO": ["BASS MID"], "GROOVE A": ["SERUM BASS"]}
+    bass_mid.arm = True
+    o = run(live.overview, song)
+    assert o["tracks"][0]["monitor"] == "Auto (armed: where it plays no clip)"
+    assert playing(o) == {"START": [], "INTRO": ["BASS MID"], "GROOVE A": ["BASS MID", "SERUM BASS"]}
+
+
+def test_monitor_off_hears_no_input(song):
+    take_input(song.tracks[0], song.tracks[1], monitor=2)
+    o = run(live.overview, song)
+    assert "plays_via" not in o["tracks"][0] and playing(o)["GROOVE A"] == ["SERUM BASS"]
+
+
+@pytest.mark.parametrize("channel, heard", [("Post FX", True), ("Pre FX", True), ("Post Mixer", False)])
+def test_a_muted_source_still_feeds_before_its_mixer_not_after(song, channel, heard):
+    take_input(song.tracks[0], song.tracks[1], channel=channel)
+    song.tracks[1].mute = True
+    assert playing(run(live.overview, song))["GROOVE A"] == (["BASS MID"] if heard else [])
+
+
+def test_resampling_plays_where_anything_else_plays(song):
+    rec = Track("RESAMPLE", audio=True)
+    song.tracks.append(rec)
+    take_input(rec, "Resampling")
+    o = run(live.overview, song)
+    assert o["tracks"][-1]["plays_via"] == "Resampling" and o["tracks"][-1]["input"] == "Resampling"
+    assert playing(o) == {"START": [], "INTRO": [], "GROOVE A": ["SERUM BASS", "RESAMPLE"]}
+
+
+def test_a_group_mute_silences_its_tracks_and_a_group_feeds_what_its_tracks_play(song):
+    group, serum, bass_mid = Track("🎸 BASS"), song.tracks[1], song.tracks[0]
+    group.is_foldable, group.can_be_armed = True, False
+    song.tracks.insert(1, group)
+    serum.is_grouped, serum.group_track = True, group
+    take_input(bass_mid, group)
+    assert playing(run(live.overview, song))["GROOVE A"] == ["BASS MID", "SERUM BASS"]
+    group.mute = True
+    assert playing(run(live.overview, song))["GROOVE A"] == ["BASS MID"]
+
+
+def test_tracks_feeding_each_other_end(song):
+    take_input(song.tracks[0], song.tracks[3])
+    take_input(song.tracks[3], song.tracks[0])
+    assert playing(run(live.overview, song))["GROOVE A"] == ["SERUM BASS"]
+
+
+def test_a_solo_comes_first_and_the_sections_say_what_it_silences(song):
+    """20.11.2026: SERUM sat soloed all evening and every recording held only SERUM."""
+    take_input(song.tracks[0], song.tracks[1])
+    song.tracks[3].arrangement_clips = [Clip("stab", 192.0, 200.0)]
+    song.tracks[1].solo = True
+    for t in song.tracks[:1] + song.tracks[2:] + song.return_tracks:  # Live's own answer, read as is
+        t.muted_via_solo = True
+    o = run(live.overview, song)
+    assert list(o)[:2] == ["warning", "soloed"] and o["soloed"] == ["SERUM BASS"]
+    assert o["warning"].startswith("SOLO IS ON: 'SERUM BASS' soloed, so 5 other tracks are silent")
+    groove = o["sections"][2]
+    assert groove["playing"] == ["SERUM BASS"] and groove["silenced_by_solo"] == ["BASS MID", "PAD / STAB"]
+    assert o["tracks"][1]["flags"] == ["solo"] and o["tracks"][0]["flags"] == ["silenced by solo"]
+    assert o["returns"][0]["flags"] == ["silenced by solo"]
+    assert "warning" in run(live.overview, song, response_format="detailed")
 
 
 def test_track_reads_every_shown_value_or_one_device(song):

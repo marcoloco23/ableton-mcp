@@ -108,9 +108,16 @@ def register(mcp: Any, get_ableton_connection: Callable[[], Any]) -> None:
     @mcp.tool(annotations=_read("Read the whole set"))
     def live_overview(ctx: Context, response_format: Format = "concise") -> str:
         """The whole open set in one call: tempo, loop, the sections (from the locators) with the tracks
-        playing in each, and every track with its group, mute/solo/arm/frozen flags, volume as shown,
+        heard in each, and every track with its group, mute/solo/arm/frozen flags, volume as shown,
         output, device names and the bars its clips cover; then return tracks and the master.
         Read this before saying anything about the set.
+
+        What sounds where, as Live plays it: a track whose input is another track and whose monitor is In
+        (or Auto while armed, where it plays no clip) says plays_via, input and monitor, and is heard
+        wherever its source plays (Resampling: wherever anything plays). Monitor In silences a track's own
+        clips. Muted tracks and tracks in a muted group are not heard. When anything is soloed, "warning"
+        and "soloed" come first, the tracks Live silences via solo carry the flag "silenced by solo", and
+        each section lists them under silenced_by_solo, not playing.
 
         response_format "concise" gives clip bars as merged spans ("17-48, 65-208"); "detailed" lists each
         clip by name and bars, plus pan and sends per track.

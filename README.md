@@ -141,7 +141,7 @@ The conventions are stated once, in the server's instructions:
 
 | Tool | Job |
 |------|-----|
-| `live_overview(response_format)` | The whole set: sections from the locators with what plays in each, every track (group, flags, volume, output, devices, clip bars), returns, master |
+| `live_overview(response_format)` | The whole set: sections from the locators with what is heard in each, every track (group, flags, volume, output, devices, clip bars, `plays_via` when it plays another track through its input), returns, master; a solo comes first as `warning` |
 | `live_track(track, response_format)` | One track, or one device on it (`"SERUM BASS / Saturator"`): mixer, sends, routing, every parameter as shown, clips |
 | `live_set(changes)` | Any number of parameters and track settings by shown value; all checked before any is set, the rest put back if Live refuses one; returns before → after |
 | `live_notes_read(track, bars, scene, as_grid, response_format)` | Notes in bars, from every clip on the track (or the session clip in scene) |
