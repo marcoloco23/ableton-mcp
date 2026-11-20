@@ -449,15 +449,17 @@ def write_notes(song, p, ctrl):
 
 # --- clips, scenes, tracks, transport, locators --------------------------------------------
 
-CLIP_ACTIONS = ("duplicate", "move", "delete", "mute", "unmute", "rename", "to_arrangement")
+CLIP_ACTIONS = ("duplicate", "move", "delete", "mute", "unmute", "rename", "groove", "to_arrangement")
 
 
 def clips(song, p, ctrl):
     """Act on arrangement clips that start in `bars`, or on the session clips in `scene`, on one
-    track or every track: duplicate | move | delete | mute | unmute | rename | to_arrangement.
+    track or every track: duplicate | move | delete | mute | unmute | rename | groove | to_arrangement.
 
-    to_arrangement fills the arrangement `bars` with the scene's clips, each repeated back to back
-    at its own length; a copy that would run past the bars is left out and reported.
+    groove gives each clip the groove pool's `groove` ("none" takes it off); if Live refuses one clip,
+    the clips before it get their old groove back. to_arrangement fills the arrangement `bars` with
+    the scene's clips, each repeated back to back at its own length; a copy that would run past the
+    bars is left out and reported.
     """
     action = p.get("action")
     if action not in CLIP_ACTIONS:
@@ -473,6 +475,11 @@ def clips(song, p, ctrl):
                          "e.g. scene=\"DROP 1\", bars=\"89-112\"")
     if action == "rename" and not p.get("name"):
         raise ValueError("rename needs name")
+    if action == "groove":
+        if not p.get("groove"):
+            raise ValueError("groove needs groove: a name from the set's groove pool, or \"none\" to take it off")
+        groove = None if p["groove"].strip().lower() == "none" else lom.find(
+            song.groove_pool.grooves, p["groove"], "groove", " in the groove pool")
     if session:
         sc = lom.scene(song, p["scene"])
         number = list(song.scenes).index(sc) + 1
@@ -519,6 +526,18 @@ def clips(song, p, ctrl):
             for t, c, _ in chosen:
                 t.delete_clip(c)
         return {"action": action, "clips": before, "to": lom.bars_text(song, to, to + times * span), "times": times}
+    if action == "groove":
+        was = [c.groove for _, c, _ in chosen]
+        for k, (t, c, _) in enumerate(chosen):
+            try:
+                c.groove = groove
+            except Exception as e:
+                for (_, d, _), g in zip(chosen[:k], was):
+                    d.groove = g
+                raise RuntimeError("'%s' on '%s' refused the groove: %s. The %d clip(s) before it have their old "
+                                   "groove back" % (c.name, t.name, e, k))
+        return {"action": action, "clips": [dict(row, before=_groove_name(g), after=_groove_name(c.groove))
+                                            for row, g, (_, c, _) in zip(before, was, chosen)]}
     for t, c, slot in chosen:
         if action == "delete":
             slot.delete_clip() if slot is not None else t.delete_clip(c)
@@ -530,6 +549,10 @@ def clips(song, p, ctrl):
         return {"action": action, "clips": before}
     return {"action": action, "clips": [dict(row, name=c.name, **({"muted": bool(c.muted)} if action != "rename" else {}))
                                         for row, (t, c, _) in zip(before, chosen)]}
+
+
+def _groove_name(groove):
+    return "none" if groove is None else str(groove.name)
 
 
 def _slot_clip(song, t, c):
