@@ -1,7 +1,7 @@
 """The live_* commands on a fake Live set: whole jobs by name and bar."""
 import pytest
 
-from fake_live import Clip, Ctrl, Slot, Track, demo_song, live, lom, take_input
+from fake_live import Clip, Ctrl, Note, Slot, Track, demo_song, live, lom, take_input
 
 
 @pytest.fixture
@@ -230,7 +230,7 @@ def test_locators_rename_add_and_refuse_while_playing(song):
 # --- reading -------------------------------------------------------------------------------
 
 def test_overview_sections_say_what_plays(song):
-    song.tracks[0].arrangement_clips = [Clip("mid", 64.0, 96.0), Clip("mid", 96.0, 128.0)]
+    song.tracks[0].arrangement_clips = [Clip("mid", 64.0, 96.0, [Note(36, 0.0, 32.0)]), Clip("mid", 96.0, 128.0)]
     o = run(live.overview, song)
     assert o["sections"] == [{"name": "START", "bars": "1-16", "playing": []},
                              {"name": "INTRO", "bars": "17-48", "playing": ["BASS MID"]},
@@ -241,6 +241,27 @@ def test_overview_sections_say_what_plays(song):
 
 
 # what sounds where: input routing, monitor, mute and solo ------------------------------------
+
+def test_a_midi_clip_sounds_only_where_its_notes_play_and_so_does_a_track_fed_by_it(song):
+    """20.11.2026: SUB's clips at bars 145-152 were emptied on purpose; the checklist still put SUB and
+    BASS MID (SUB's MIDI through its input) under MINI BREAK 145."""
+    song.cue_points.append(type(song.cue_points[0])("MINI BREAK", 208.0))
+    sub, bass_mid = song.tracks[1], song.tracks[0]
+    sub.arrangement_clips += [Clip("empty", 208.0, 224.0), Clip("muted notes", 224.0, 232.0, [Note(36, 0.0, 1.0, mute=True)])]
+    take_input(bass_mid, sub)
+    o = run(live.overview, song, response_format="detailed")
+    assert playing(o)["MINI BREAK"] == [] and playing(o)["GROOVE A"] == ["BASS MID", "SERUM BASS"]
+    # the notes at beats 0-6 of the 16-beat clip at bar 49: bars 49-50; BASS MID hears the same
+    assert o["tracks"][1]["sounds"] == "49-50" and o["tracks"][0]["sounds"] == "49-50"
+
+
+def test_a_looped_midi_clip_sounds_in_every_repeat_and_an_audio_clip_over_its_span(song):
+    song.tracks[3].arrangement_clips = [Clip("loop", 64.0, 96.0, [Note(60, 0.0, 0.5)], loop=(0.0, 8.0))]
+    song.tracks[4].arrangement_clips = [Clip("hit", 128.0, 136.0)]
+    song.tracks[4].arrangement_clips[0].is_midi_clip = False
+    o = run(live.overview, song, response_format="detailed")
+    assert o["tracks"][3]["sounds"] == "17-17, 19-19, 21-21, 23-23" and o["tracks"][4]["sounds"] == "33-34"
+
 
 def playing(o):
     return {s["name"]: s["playing"] for s in o["sections"]}
@@ -268,7 +289,7 @@ def test_monitor_in_suppresses_the_tracks_own_clips(song):
 def test_auto_hears_the_input_only_while_armed_and_the_clips_too(song):
     bass_mid = song.tracks[0]
     take_input(bass_mid, song.tracks[1], monitor=1)
-    bass_mid.arrangement_clips = [Clip("mid", 64.0, 96.0)]
+    bass_mid.arrangement_clips = [Clip("mid", 64.0, 96.0, [Note(36, 0.0, 1.0)])]
     o = run(live.overview, song)
     assert "plays_via" not in o["tracks"][0]
     assert playing(o) == {"START": [], "INTRO": ["BASS MID"], "GROOVE A": ["SERUM BASS"]}
@@ -320,7 +341,7 @@ def test_tracks_feeding_each_other_end(song):
 def test_a_solo_comes_first_and_the_sections_say_what_it_silences(song):
     """20.11.2026: SERUM sat soloed all evening and every recording held only SERUM."""
     take_input(song.tracks[0], song.tracks[1])
-    song.tracks[3].arrangement_clips = [Clip("stab", 192.0, 200.0)]
+    song.tracks[3].arrangement_clips = [Clip("stab", 192.0, 200.0, [Note(60, 0.0, 0.5)])]
     song.tracks[1].solo = True
     for t in song.tracks[:1] + song.tracks[2:] + song.return_tracks:  # Live's own answer, read as is
         t.muted_via_solo = True
