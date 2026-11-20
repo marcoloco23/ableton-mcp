@@ -417,3 +417,27 @@ def test_rename_answers_with_the_new_name(song):
     r = run(live.clips, song, action="rename", track="SERUM BASS", bars="49", name="Bass B")
     assert r["clips"] == [{"track": "SERUM BASS", "name": "Bass B", "bars": "49-52"}]
     assert run(live.clips, song, action="mute", track="SERUM BASS", bars="49")["clips"][0]["muted"] is True
+
+
+# locators: several adds in one batch land in order, none lost ---------------------------------
+
+class TickCtrl:
+    """Like Live: a scheduled step runs on a later tick, not at once."""
+    def __init__(self):
+        self.queue = []
+
+    def schedule_message(self, ticks, fn):
+        self.queue.append(fn)
+
+    def run(self):
+        while self.queue:
+            self.queue.pop(0)()
+
+
+def test_several_new_locators_in_one_batch_all_land(song):
+    ctrl = TickCtrl()
+    for bar, name in [(33, "BUILD"), (97, "BREAK"), (113, "GROOVE B"), (177, "OUTRO")]:
+        assert live.locators(song, {"action": "set", "bar": bar, "name": name}, ctrl)["pending"] == "set"
+    ctrl.run()
+    got = {(c["name"], c["bar"]) for c in live.locators(song, {"action": "list"}, ctrl)["locators"]}
+    assert {("BUILD", 33.0), ("BREAK", 97.0), ("GROOVE B", 113.0), ("OUTRO", 177.0), ("INTRO", 17.0), ("GROOVE A", 49.0)} <= got
