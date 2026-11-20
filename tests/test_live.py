@@ -1,7 +1,7 @@
 """The live_* commands on a fake Live set: whole jobs by name and bar."""
 import pytest
 
-from fake_live import Clip, Ctrl, Track, demo_song, live, lom
+from fake_live import Clip, Ctrl, Slot, Track, demo_song, live, lom
 
 
 @pytest.fixture
@@ -108,6 +108,48 @@ def test_clips_duplicate_mute_and_move(song):
         run(live.clips, song, action="move", track="SERUM BASS", bars="49-52", to_bar=51)
     with pytest.raises(LookupError, match="no clip starts in bars 1-4 on 'SERUM BASS'"):
         run(live.clips, song, action="delete", track="SERUM BASS", bars="1-4")
+
+
+def test_clips_groove_by_pool_name_and_none_takes_it_off(song):
+    song.tracks[0].clip_slots[1] = Slot(Clip("hats", 0.0, 16.0))
+    song.tracks[1].clip_slots[1] = Slot(Clip("kick", 0.0, 16.0))
+    song.tracks[1].clip_slots[1].clip.groove = song.groove_pool.grooves[0]
+    r = run(live.clips, song, action="groove", scene="Groove", groove="swing mpc 3000 16ths 57")
+    assert [(c["track"], c["before"], c["after"]) for c in r["clips"]] == [
+        ("BASS MID", "none", "Swing MPC 3000 16ths 57"), ("SERUM BASS", "Swing Logic 16ths 52", "Swing MPC 3000 16ths 57")]
+    assert song.tracks[0].clip_slots[1].clip.groove is song.groove_pool.grooves[2]
+    r = run(live.clips, song, action="groove", track="SERUM BASS", bars="49", groove="None")
+    assert r["clips"] == [{"track": "SERUM BASS", "name": "Bass A", "bars": "49-52", "before": "none", "after": "none"}]
+    r = run(live.clips, song, action="groove", track="SERUM BASS", scene=2, groove="none")
+    assert (r["clips"][0]["before"], r["clips"][0]["after"]) == ("Swing MPC 3000 16ths 57", "none")
+    assert song.tracks[1].clip_slots[1].clip.groove is None
+
+
+def test_clips_groove_checks_the_name_before_any_clip_changes(song):
+    with pytest.raises(LookupError) as e:
+        run(live.clips, song, action="groove", track="SERUM BASS", bars="49", groove="Swing MPC 16ths 57")
+    assert "no groove 'Swing MPC 16ths 57' in the groove pool (did you mean 'Swing MPC 3000 16ths 57'" in str(e.value)
+    with pytest.raises(ValueError, match="groove needs groove"):
+        run(live.clips, song, action="groove", track="SERUM BASS", bars="49")
+    assert song.tracks[1].arrangement_clips[0].groove is None
+
+
+def test_clips_groove_puts_the_old_grooves_back_when_live_refuses_one(song):
+    class Refusing(Clip):  # whether Live refuses a clip a groove is not measured; this proves the put-back
+        @property
+        def groove(self):
+            return None
+
+        @groove.setter
+        def groove(self, g):
+            if g is not None:
+                raise RuntimeError("no groove here")
+
+    song.tracks[0].clip_slots[1] = Slot(Clip("hats", 0.0, 16.0))
+    song.tracks[1].clip_slots[1] = Slot(Refusing("loop", 0.0, 16.0))
+    with pytest.raises(RuntimeError, match="'loop' on 'SERUM BASS' refused the groove: no groove here. The 1 clip"):
+        run(live.clips, song, action="groove", scene="Groove", groove="Swing MPC 3000 16ths 57")
+    assert song.tracks[0].clip_slots[1].clip.groove is None
 
 
 def test_tracks_by_name(song):

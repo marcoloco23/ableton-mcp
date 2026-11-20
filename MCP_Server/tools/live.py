@@ -209,27 +209,33 @@ def register(mcp: Any, get_ableton_connection: Callable[[], Any]) -> None:
 
     @mcp.tool(annotations=_write("Edit clips", destructive=True, idempotent=False))
     def live_clips(ctx: Context,
-                   action: Literal["duplicate", "move", "delete", "mute", "unmute", "rename", "to_arrangement"],
+                   action: Literal["duplicate", "move", "delete", "mute", "unmute", "rename", "groove",
+                                   "to_arrangement"],
                    bars: str | None = None, scene: str | int | None = None, track: str | None = None,
-                   to_bar: int | None = None, times: int = 1, name: str | None = None) -> str:
+                   to_bar: int | None = None, times: int = 1, name: str | None = None,
+                   groove: str | None = None) -> str:
         """Act on clips on one track, or on every track when track is left out. With bars ("49-52",
         inclusive): the arrangement clips that START in those bars. With scene (name, or number from 1):
         the session clips in that scene.
 
         duplicate copies arrangement clips to to_bar, `times` copies back to back (the bars' length apart);
         move copies once to to_bar and deletes the originals (bars may not overlap); delete; mute / unmute;
-        rename gives each clip `name`. to_arrangement takes scene and bars: it fills those arrangement bars
-        with the scene's clips, each repeated back to back at its own length (exact, no real-time
-        recording); a copy that would run past the bars is left out and listed. Returns the clips it acted
-        on. Cmd+Z in Live undoes each step.
+        rename gives each clip `name`; groove gives each clip `groove`, a groove in the set's groove pool by
+        name, or "none" to take the groove off, and returns each clip's groove before and after (if Live
+        refuses one clip, the clips before it get their old groove back). to_arrangement takes scene and
+        bars: it fills those arrangement bars with the scene's clips, each repeated back to back at its own
+        length (exact, no real-time recording); a copy that would run past the bars is left out and listed.
+        Returns the clips it acted on. Cmd+Z in Live undoes each step.
 
         Examples:
           live_clips("mute", bars="113-176", track="BASS STK")
           live_clips("duplicate", bars="1-8", to_bar=17, times=24)          -> every track's 8-bar loop over 17-208
           live_clips("to_arrangement", scene="DROP 1", bars="89-112")      -> the DROP 1 scene over its section
+          live_clips("groove", track="CLOSED HAT", bars="1-208", groove="Swing MPC 3000 16ths 57")
+          live_clips("groove", track="KICK", bars="1-208", groove="none")   -> the kick carries no groove
         """
         return out(call("live_clips", action=action, bars=bars, scene=scene, track=track, to_bar=to_bar, times=times,
-                        name=name))
+                        name=name, groove=groove))
 
     @mcp.tool(annotations=_write("Session scenes", destructive=True, idempotent=False))
     def live_scenes(ctx: Context, action: Literal["list", "create", "rename", "fire", "delete"] = "list",

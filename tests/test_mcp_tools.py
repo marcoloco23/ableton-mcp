@@ -92,3 +92,10 @@ def test_lom_escape_hatch_maps_to_the_lom_commands():
     call(m, "live_lom", op="batch", ops=[{"op": "get", "path": "tempo"}])
     assert [s[0] for s in conn.sent] == ["lom_get", "lom_set", "lom_batch"]
     assert conn.sent[1][1] == {"path": "tracks[PAD].mute", "value": True}
+
+
+def test_live_clips_groove_forwards_the_groove_name():
+    conn = Conn({})
+    call(tools_with(conn), "live_clips", action="groove", track="KICK", bars="1-208", groove="none")
+    assert conn.sent == [("live_clips", {"action": "groove", "bars": "1-208", "track": "KICK", "times": 1,
+                                         "groove": "none"})]

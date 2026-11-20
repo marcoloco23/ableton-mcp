@@ -84,6 +84,7 @@ class Clip:
         self.end_marker = self.loop_end
         self.length = self.loop_end - self.loop_start
         self.warping, self.pitch_coarse = True, 0
+        self.groove = None  # a Groove from the song's groove pool, or None as in Live
 
     def get_notes_extended(self, from_pitch, pitch_span, from_time, time_span):
         return [n for n in self.notes if from_pitch <= n.pitch < from_pitch + pitch_span
@@ -252,6 +253,11 @@ class Scene:
         self.fired += 1
 
 
+class Groove:
+    def __init__(self, name):
+        self.name = name
+
+
 class Cue:
     def __init__(self, name, time):
         self.name, self.time = name, time
@@ -265,6 +271,9 @@ class Song:
         self.tempo, self.loop, self.loop_start, self.loop_length = 124.0, True, 0.0, 32.0
         self.current_song_time, self.is_playing, self.metronome, self.record_mode = 0.0, False, False, False
         self.scenes = [Scene("Intro"), Scene("Groove")]
+        # as read from a real set, 20.11.2026: song.groove_pool.grooves, each with a name
+        self.groove_pool = types.SimpleNamespace(grooves=[Groove(n) for n in (
+            "Swing Logic 16ths 52", "Swing Logic 16ths 58", "Swing MPC 3000 16ths 57")])
         self.master_track.can_be_armed = False
         for r in self.return_tracks:
             r.can_be_armed = False
