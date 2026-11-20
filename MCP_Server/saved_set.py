@@ -5,7 +5,7 @@ Live refuses to create them there ("Not a session clip or parameter belongs to a
 script will not edit them either (pushbase AutomationComponent: no envelopes on an arrangement clip). The saved
 set is gzipped XML in which every automatable control carries an AutomationTarget id, and an arrangement lane is
 an AutomationEnvelope of FloatEvents (time in beats, value in the control's own unit) on its track. So lanes are
-read from the .als, and written into it, and Live shows written lanes once it opens the set again.
+read from the .als, and written into a new .als beside it, which Live then opens.
 
 Two things make that exact and safe:
 
@@ -15,11 +15,15 @@ at both ends of the control's range (str_for_value, a read) must land on the XML
 current value on the XML's when nothing automates it. The same match pairs each of Live's parameters with its XML
 element, in order, so "PAD / Utility / Gain" finds StereoGain.Gain without a table of names.
 
-Freshness. Live writes its undo history to disk (Preferences/Ableton/Live x/Undo/*.band) on every change and on
-every save. A set file older than that journal has changes in Live that the file lacks, and patching it and
-reopening would lose them. So a patch needs the set saved after the last change, keeps the original in the
-project's Backup folder, checks the XML it wrote before it replaces the set, and reopening is its own step that
-checks again.
+Freshness. Live writes its undo history to disk (Preferences/Ableton/Live x/Undo/*.band) with every undo step and
+a few ms after every save. A journal newer than the set file means Live holds changes the file lacks, and Live
+would ask "Save changes?" before switching sets. That includes a set just opened: plug-ins record undo steps while
+a set loads ("Change Plug-in Parameter List", "Change \"Program\"", read from the journal on 21.11.2026), so Live
+counts it as changed until it is saved once. So a patch needs the set saved after its last change. It writes the
+lanes into a new file beside the set, "<set> [auto <date time>].als", leaving the set itself untouched (with a copy
+in Backup/Before automate), checks the XML, and opens the new file only if Live still holds nothing unsaved: Live
+switches to it without a dialog and keeps working there. Opening the path that is already open does nothing in
+Live (21.11.2026), which is why the file is new.
 
 Only reads reach Live from here (get, and str_for_value); a test holds that.
 """
@@ -105,17 +109,27 @@ def journal_time(prefs: Path | None = None) -> float | None:
     return max(times) if times else None
 
 
-def state(path: Path, prefs: Path | None = None) -> str:
-    """'unsaved': Live changed the set after the file was written. 'saved': the file is Live's own save of what it
-    holds. 'patched': the file was written after Live's last change, by a patch, and waits for a reopen."""
+def session_start(prefs: Path | None = None) -> float | None:
+    """When Live last opened a set: it starts a new undo journal (Undo/bands.cfg) then."""
+    times = [p.stat().st_mtime for p in (prefs or PREFS).glob("Live */Undo/bands.cfg")]
+    return max(times) if times else None
+
+
+def unsaved(path: Path, prefs: Path | None = None) -> str | None:
+    """Why Live holds changes the set file lacks, or None when it holds none (Live's undo journal is no newer
+    than the file's last save)."""
     j = journal_time(prefs)
     if j is None:
         raise Refused(f"no undo journal under {prefs or PREFS}, so there is no telling whether Live has unsaved "
-                      "changes; nothing written")
+                      "changes; nothing done")
     f = path.stat().st_mtime
+    start = session_start(prefs)
+    if start is not None and start > f + SAVED_AFTER:  # opened after its last save, and not saved since
+        return (f"Live counts {path.name} as changed since it opened at {_clock(start)}: plug-ins record steps while "
+                "a set loads, and Live would ask to save before switching sets")
     if j > f + SAVED_AFTER:
-        return "unsaved"
-    return "saved" if f - j <= SAVED_AFTER else "patched"
+        return f"Live has changes since {path.name} was saved at {_clock(f)} (last change {_clock(j)})"
+    return None
 
 
 def _clock(t: float) -> str:
@@ -689,18 +703,25 @@ def _lane_form(lane: dict) -> str:
     return f"{lane['track']} / {param if simple else param.replace('.', ' / ', 1)}"
 
 
-def patch(conn, lanes: list[dict], prefs: Path | None = None, now: float | None = None) -> dict:
-    """Write lanes into the saved set of the set open in Live, at once. Lanes as live_automate takes them:
-    {"target", "points": [[bar, value]], "shape"?} or {"target", "clear": "all"}. A mixer volume is refused
-    (fades go on a Utility's Gain). Live shows the lanes after reopen()."""
+def _open_in_live(path: Path) -> None:
+    subprocess.run(["open", "-b", "com.ableton.live", str(path)], check=True)
+
+
+SAVE_FIRST = "Save the set in Live (Cmd+S, or dj produce save) and run this again. Nothing written."
+
+
+def patch(conn, lanes: list[dict], open_it: bool = True, prefs: Path | None = None, now: float | None = None,
+          opener=None) -> dict:
+    """Write lanes into a copy of the set open in Live, "<set> [auto <date time>].als" beside it, and open that copy
+    in Live (open_it=False only writes it). Lanes as live_automate takes them: {"target", "points": [[bar, value]],
+    "shape"?} or {"target", "clear": "all"}. A mixer volume is refused (fades go on a Utility's Gain)."""
     live = Live(conn)
     path = Path(live.get("file_path")[0] or "")
     if not path.name.endswith(".als") or not path.exists():
         raise Refused("the set open in Live has never been saved; save it first")
-    st = state(path, prefs)
-    if st == "unsaved":
-        raise Refused(f"Live has changes since {path.name} was saved at {_clock(path.stat().st_mtime)} (last change "
-                      f"{_clock(journal_time(prefs))}); save the set in Live and run this again. Nothing written.")
+    why = unsaved(path, prefs)
+    if why:
+        raise Refused(f"{why}. {SAVE_FIRST}")
     seen = path.stat().st_mtime_ns
     root = load(path)
     view = SetView(live, root)
@@ -735,36 +756,31 @@ def patch(conn, lanes: list[dict], prefs: Path | None = None, now: float | None 
         controls.append(c)
     data = dump(root)
     validate(data, controls)
-    stamp = time.strftime("%Y-%m-%d %H%M%S", time.localtime(now or time.time()))
+    stamp = time.strftime("%Y-%m-%d %H%M%S", time.localtime(time.time() if now is None else now))
     backup = path.parent / "Backup" / "Before automate" / f"{path.stem} [{stamp}].als"
     backup.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(path, backup)
-    if path.stat().st_mtime_ns != seen or state(path, prefs) == "unsaved":
-        raise Refused("Live saved or changed the set while the lanes were being written; nothing replaced. Run again.")
-    tmp = path.with_name(f".{path.name}.automate")
+    base = re.sub(r" \[auto [^\]]*\]$", "", path.stem)  # a second round names its file after the set, not the first round
+    new = path.with_name(f"{base} [auto {stamp}].als")
+    tmp = new.with_name(f".{new.name}.writing")
     tmp.write_bytes(data)
-    os.replace(tmp, path)
-    return {"set": str(path), "backup": str(backup), "lanes": done,
-            "next": "Live still plays the set as it was: reopen it (live_reopen / dj produce reopen) to hear the lanes. "
-                    "Saving in Live before that keeps Live's version and drops these lanes."}
-
-
-def reopen(conn, confirm: bool = False, prefs: Path | None = None,
-           opener=lambda p: subprocess.run(["open", "-b", "com.ableton.live", str(p)], check=True)) -> dict:
-    """Open the patched set again in Live, so it plays the written lanes. Refused when Live has changes the file
-    lacks (they would be lost) or when the file is Live's own save (nothing patched to load)."""
-    path = Path(Live(conn).get("file_path")[0] or "")
-    st = state(path, prefs)
-    if st == "unsaved":
-        raise Refused("Live has changes since the patch; reopening would lose them. Nothing done. Save in Live "
-                      "(which keeps Live's version and drops the patched lanes) and run automate again.")
-    if st == "saved":
-        raise Refused(f"{path.name} is Live's own save of what it holds; nothing patched waits to be loaded.")
-    if not confirm:
-        return {"set": str(path), "state": st, "would": "reopen it in Live (confirm to do it)"}
-    opener(path)
-    return {"set": str(path), "reopened": True,
-            "note": "If Live asks to save changes, choose Cancel: the set changed after the check."}
+    os.replace(tmp, new)
+    out = {"set": str(new), "from": str(path), "backup": str(backup), "lanes": done, "opened": False}
+    # Checked again right before switching: a change made while the lanes were written is not in the new file.
+    why = "Live saved the set while the lanes were being written" if path.stat().st_mtime_ns != seen \
+        else unsaved(path, prefs)
+    if why:
+        out["next"] = (f"{why}, so Live was left as it is. {new.name} holds the lanes without those changes; run this "
+                       "again after saving to write them onto the newest save.")
+    elif not open_it:
+        out["next"] = f"Open {new.name} in Live to hear the lanes; Live then saves into it."
+    else:
+        (opener or _open_in_live)(new)
+        out["opened"] = True
+        out["next"] = (f"Live is switching to {new.name}; Cmd+S now saves there, and {path.name} stays as it was. "
+                       "Live counts a freshly opened set as changed (its plug-ins record steps while loading), so save "
+                       "once before the next saved-set write.")
+    return out
 
 
 def lanes(conn, prefix: str | None = None, tolerance: float = 0.5, prefs: Path | None = None) -> dict:
@@ -796,9 +812,9 @@ def lanes(conn, prefix: str | None = None, tolerance: float = 0.5, prefs: Path |
             texts = _texts(view, c, [v for _, v in pts] + before[:1])
             out.append({"target": c.target, "before": texts[-1] if before else None,
                         "points": [[round(view.bar(t), 2), s] for (t, _), s in zip(pts, texts)]})
-    st = state(path, prefs)
-    return {"set": str(path), "saved": _clock(path.stat().st_mtime), "state": st,
-            "note": "Live has changes since this save; these are the saved lanes." if st == "unsaved" else None,
+    why = unsaved(path, prefs)
+    return {"set": str(path), "saved": _clock(path.stat().st_mtime), "state": "unsaved" if why else "saved",
+            "note": f"{why}; these are the saved lanes." if why else None,
             "lanes": out, "skipped": skipped}
 
 
