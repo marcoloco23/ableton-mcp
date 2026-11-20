@@ -9,6 +9,7 @@ from __future__ import absolute_import, print_function, unicode_literals
 
 import bisect
 import collections
+import math
 import os
 import time
 
@@ -83,6 +84,9 @@ def _clip_rows(song, t, concise):
 # A group feeds what its tracks play; the Main (also Resampling) and a return what any other track plays.
 # Solo is Live's own answer, track.muted_via_solo: True on every track a solo silences, and not on the
 # returns under Solo in Place, the groups around a soloed track or a source feeding one.
+# A MIDI clip sounds only in the bars its notes play (looped clips unrolled as live_notes_read reads
+# them): on 20.11.2026 SUB's clips at bars 145-152 were emptied on purpose and still read as playing.
+# An audio clip sounds over its span. Sounding is kept in whole bars.
 
 def _heard_input(t):
     """'In', 'Auto' (armed: heard where the track plays no clip) or None: when Live hears t's input."""
@@ -100,10 +104,36 @@ def _on(t, attr):
         return False
 
 
+def _bars_of(song, spans):
+    """[(from, to)] song beats -> the whole bars they touch, merged, as [(from, to)] beats."""
+    bpb, out = lom.beats_per_bar(song), []
+    for a, b in sorted((math.floor(a / bpb + 1e-6) * bpb, math.ceil(max(b, a + 1e-3) / bpb - 1e-6) * bpb)
+                         for a, b in spans):
+        if out and a <= out[-1][1]:
+            out[-1][1] = max(out[-1][1], b)
+        else:
+            out.append([a, b])
+    return [tuple(x) for x in out]
+
+
+def _sounds(song, clip):
+    """Where an arrangement clip sounds, in whole bars: an audio clip over its span, a MIDI clip where its
+    unmuted notes play, its loop unrolled (one notes read per clip)."""
+    if not getattr(clip, "is_midi_clip", False):
+        return _bars_of(song, [(clip.start_time, clip.end_time)])
+    segs = _segments(clip)
+    lo = min(ct for _, _, ct in segs) if segs else 0.0
+    hi = max(ct + b - a for a, b, ct in segs) if segs else 0.0
+    notes = [n for n in clip.get_notes_extended(0, 128, lo, hi - lo) if not getattr(n, "mute", False)]
+    return _bars_of(song, [(a0 + n.start_time - ct, min(b0, a0 + n.start_time - ct + n.duration))
+                           for a0, b0, ct in segs for n in notes if ct <= n.start_time < ct + (b0 - a0)])
+
+
 class Sound(object):
-    """What sounds where, from one read of the set: each track's clips, input, mixer and group."""
+    """What sounds where, from one read of the set: each track's clips and their notes, input, mixer and group."""
 
     def __init__(self, song):
+        self.song = song
         ts = self.tracks = list(song.tracks)
         self.group = [_kind(t) == "group" for t in ts]
         self.parent = [next((j for j, g in enumerate(ts) if g == t.group_track), None)
@@ -132,7 +162,8 @@ class Sound(object):
             self.via.append(src)
             self.rows.append(row)
             self.spans.append([] if mode == "In" else
-                              [(c.start_time, c.end_time) for c in _clips(t) if not getattr(c, "muted", False)])
+                              [x for c in _clips(t) if not getattr(c, "muted", False) for x in _sounds(song, c)])
+        self.heard = [self._heard(k) for k in range(len(ts))]
 
     def audible(self, k, solo=True):
         """Its mixer and every group around it let it through (and, with solo, no solo silences it)."""
@@ -143,26 +174,26 @@ class Sound(object):
             j = self.parent[j]
         return not (solo and self.by_solo[k])
 
-    def signal(self, k, s, e, seen=()):
-        """Track k makes sound somewhere in [s, e) before its mixer: a clip, or what its input hears."""
+    def _heard(self, k, seen=()):
+        """Where track k makes sound before its mixer, in whole bars: its clips, and what its input hears."""
         if k in seen:
-            return False
+            return []
         seen += (k,)
+        n = range(len(self.tracks))
         if self.group[k]:
-            return any(self.parent[j] == k and not self.mute[j] and self.signal(j, s, e, seen)
-                       for j in range(len(self.tracks)))
-        if any(a < e and b > s for a, b in self.spans[k]):
-            return True
-        src = self.via[k]
-        if src == "any":
-            return any(not self.group[j] and self.audible(j) and self.signal(j, s, e, seen)
-                       for j in range(len(self.tracks)) if j != k)
-        return src is not None and self.signal(src, s, e, seen) and (not self.post_mixer[k] or self.audible(src))
+            out = [x for j in n if self.parent[j] == k and not self.mute[j] for x in self._heard(j, seen)]
+        else:
+            out, src = list(self.spans[k]), self.via[k]
+            if src == "any":
+                out += [x for j in n if j != k and not self.group[j] and self.audible(j) for x in self._heard(j, seen)]
+            elif src is not None and (not self.post_mixer[k] or self.audible(src)):
+                out += self._heard(src, seen)
+        return _bars_of(self.song, out)
 
     def section(self, s, e):
         """(playing, silenced by solo) in [s, e): the tracks heard there, and those a solo silences."""
         on = [k for k in range(len(self.tracks)) if not self.group[k] and self.audible(k, solo=False)
-              and self.signal(k, s, e)]
+              and any(a < e and b > s for a, b in self.heard[k])]
         return ([self.tracks[k].name for k in on if not self.by_solo[k]],
                 [self.tracks[k].name for k in on if self.by_solo[k]])
 
@@ -193,6 +224,7 @@ def overview(song, p, ctrl):
         row.update(sound.rows[k])
         row["clips"] = _clip_rows(song, t, concise)
         if not concise:
+            row["sounds"] = lom.spans_text(song, sound.heard[k])
             row["pan"] = lom.shown(t.mixer_device.panning)
             row["sends"] = _sends(song, t)
         tracks.append(dict((key, v) for key, v in row.items() if v or not concise))

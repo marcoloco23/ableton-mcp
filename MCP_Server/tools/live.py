@@ -115,7 +115,9 @@ def register(mcp: Any, get_ableton_connection: Callable[[], Any]) -> None:
         What sounds where, as Live plays it: a track whose input is another track and whose monitor is In
         (or Auto while armed, where it plays no clip) says plays_via, input and monitor, and is heard
         wherever its source plays (Resampling: wherever anything plays). Monitor In silences a track's own
-        clips. Muted tracks and tracks in a muted group are not heard. When anything is soloed, "warning"
+        clips. A MIDI clip sounds only in the bars its notes play (an emptied clip plays nothing), an audio clip
+        over its span; "detailed" gives each track's "sounds" in bars. Muted tracks and tracks in a muted group
+        are not heard. When anything is soloed, "warning"
         and "soloed" come first, the tracks Live silences via solo carry the flag "silenced by solo", and
         each section lists them under silenced_by_solo, not playing.
 
