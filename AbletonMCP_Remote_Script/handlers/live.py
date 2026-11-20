@@ -38,7 +38,8 @@ def _clips(t):
 
 def _flags(t):
     out = []
-    for name, attr in (("muted", "mute"), ("solo", "solo"), ("armed", "arm"), ("frozen", "is_frozen")):
+    for name, attr in (("muted", "mute"), ("solo", "solo"), ("silenced by solo", "muted_via_solo"), ("armed", "arm"),
+                       ("frozen", "is_frozen")):
         try:
             if getattr(t, attr):
                 out.append(name)
@@ -69,13 +70,119 @@ def _clip_rows(song, t, concise):
                  **({"muted": True} if getattr(c, "muted", False) else {})) for c in clips]
 
 
+# --- what sounds where ----------------------------------------------------------------------
+#
+# A track sounds from its clips, or from another track through its input: on 20.11.2026 BASS MID
+# played SUB's MIDI (input "SUB / Post FX", monitor In) and had no clip, so a read of the clips alone
+# said it played nowhere. Live's manual (Routing and I/O, Monitoring):
+# - In: the input is always heard, armed or not, and the track's own clips are suppressed;
+# - Auto: the input is heard while the track is armed, except while the track plays a clip;
+# - Off: only the clips.
+# A source feeds what it plays before its own mixer (Pre FX, Post FX, and MIDI: a muted MIDI source
+# still drives the other track's instrument), after it with Post Mixer (then its mute and solo count).
+# A group feeds what its tracks play; the Main (also Resampling) and a return what any other track plays.
+# Solo is Live's own answer, track.muted_via_solo: True on every track a solo silences, and not on the
+# returns under Solo in Place, the groups around a soloed track or a source feeding one.
+
+def _heard_input(t):
+    """'In', 'Auto' (armed: heard where the track plays no clip) or None: when Live hears t's input."""
+    try:
+        m, armed = t.current_monitoring_state, bool(t.arm)
+    except Exception:  # groups, returns and the master have no monitor
+        return None
+    return "In" if m == 0 else ("Auto" if m == 1 and armed else None)
+
+
+def _on(t, attr):
+    try:
+        return bool(getattr(t, attr))
+    except Exception:
+        return False
+
+
+class Sound(object):
+    """What sounds where, from one read of the set: each track's clips, input, mixer and group."""
+
+    def __init__(self, song):
+        ts = self.tracks = list(song.tracks)
+        self.group = [_kind(t) == "group" for t in ts]
+        self.parent = [next((j for j, g in enumerate(ts) if g == t.group_track), None)
+                       if getattr(t, "is_grouped", False) else None for t in ts]
+        self.mute = [_on(t, "mute") for t in ts]
+        self.by_solo = [_on(t, "muted_via_solo") for t in ts]
+        self.soloed = [t.name for t in ts + list(song.return_tracks) if _on(t, "solo")]
+        self.spans, self.via, self.post_mixer, self.rows = [], [], [], []
+        for t in ts:
+            mode, src, row = _heard_input(t), None, {}
+            if mode:
+                rt = t.input_routing_type
+                obj = getattr(rt, "attached_object", None)
+                if obj is not None:  # a track, a group, a return or the Main
+                    src = next((j for j, u in enumerate(ts) if u == obj), "any")
+                elif lom.label(rt) == "Resampling":
+                    src = "any"
+                if src is not None:
+                    channel = _route(t, "input_routing_channel") or ""
+                    row = {"plays_via": ts[src].name if src != "any" else lom.label(rt),
+                           "input": lom.label(rt) + (" / " + channel if channel else ""),
+                           "monitor": "In" if mode == "In" else "Auto (armed: where it plays no clip)"}
+                    self.post_mixer.append(channel == "Post Mixer")
+            if src is None:
+                self.post_mixer.append(False)
+            self.via.append(src)
+            self.rows.append(row)
+            self.spans.append([] if mode == "In" else
+                              [(c.start_time, c.end_time) for c in _clips(t) if not getattr(c, "muted", False)])
+
+    def audible(self, k, solo=True):
+        """Its mixer and every group around it let it through (and, with solo, no solo silences it)."""
+        j = k
+        while j is not None:
+            if self.mute[j]:
+                return False
+            j = self.parent[j]
+        return not (solo and self.by_solo[k])
+
+    def signal(self, k, s, e, seen=()):
+        """Track k makes sound somewhere in [s, e) before its mixer: a clip, or what its input hears."""
+        if k in seen:
+            return False
+        seen += (k,)
+        if self.group[k]:
+            return any(self.parent[j] == k and not self.mute[j] and self.signal(j, s, e, seen)
+                       for j in range(len(self.tracks)))
+        if any(a < e and b > s for a, b in self.spans[k]):
+            return True
+        src = self.via[k]
+        if src == "any":
+            return any(not self.group[j] and self.audible(j) and self.signal(j, s, e, seen)
+                       for j in range(len(self.tracks)) if j != k)
+        return src is not None and self.signal(src, s, e, seen) and (not self.post_mixer[k] or self.audible(src))
+
+    def section(self, s, e):
+        """(playing, silenced by solo) in [s, e): the tracks heard there, and those a solo silences."""
+        on = [k for k in range(len(self.tracks)) if not self.group[k] and self.audible(k, solo=False)
+              and self.signal(k, s, e)]
+        return ([self.tracks[k].name for k in on if not self.by_solo[k]],
+                [self.tracks[k].name for k in on if self.by_solo[k]])
+
+    def warning(self):
+        if not self.soloed:
+            return None
+        quiet = sum(1 for k in range(len(self.tracks)) if self.by_solo[k] and not self.group[k])
+        return ("SOLO IS ON: %s soloed, so %d other tracks are silent. Playback, bounces and recordings hear only "
+                "what is soloed; unsolo before recording." % (", ".join("'%s'" % n for n in self.soloed), quiet))
+
+
 # --- reading -------------------------------------------------------------------------------
 
 def overview(song, p, ctrl):
-    """The whole set: sections from the locators with what plays in each, every track in one line."""
+    """The whole set: sections from the locators with what sounds in each, every track in one line.
+    A track playing another's clips through its input says so (plays_via); a solo is the first thing said."""
     concise = _concise(p)
+    sound = Sound(song)
     tracks = []
-    for t in song.tracks:
+    for k, t in enumerate(sound.tracks):
         row = {"name": t.name, "kind": _kind(t)}
         if getattr(t, "is_grouped", False):
             row["group"] = t.group_track.name
@@ -83,32 +190,34 @@ def overview(song, p, ctrl):
         row["volume"] = lom.shown(t.mixer_device.volume)
         row["output"] = _route(t, "output_routing_type")
         row["devices"] = [d.name for d in t.devices]
+        row.update(sound.rows[k])
         row["clips"] = _clip_rows(song, t, concise)
         if not concise:
             row["pan"] = lom.shown(t.mixer_device.panning)
             row["sends"] = _sends(song, t)
-        tracks.append(dict((k, v) for k, v in row.items() if v or not concise))
-    end = max([c.end_time for t in song.tracks for c in _clips(t)] or [lom.beats_per_bar(song)])
+        tracks.append(dict((key, v) for key, v in row.items() if v or not concise))
+    end = max([c.end_time for t in sound.tracks for c in _clips(t)] or [lom.beats_per_bar(song)])
     cues = sorted((c.time, c.name) for c in song.cue_points)
     if not cues or cues[0][0] > 0:
         cues.insert(0, (0.0, "START"))
     sections = []
     for k, (s, name) in enumerate(cues):
         e = cues[k + 1][0] if k + 1 < len(cues) else max(end, s + lom.beats_per_bar(song))
-        playing = [t.name for t in song.tracks if _kind(t) != "group" and not t.mute
-                   and any(c.start_time < e and c.end_time > s and not getattr(c, "muted", False) for c in _clips(t))]
-        sections.append({"name": name, "bars": lom.bars_text(song, s, e), "playing": playing})
-    return {
+        playing, silenced = sound.section(s, e)
+        sections.append(dict({"name": name, "bars": lom.bars_text(song, s, e), "playing": playing},
+                             **({"silenced_by_solo": silenced} if sound.soloed else {})))
+    head = {"warning": sound.warning(), "soloed": sound.soloed} if sound.soloed else {}
+    return dict(head, **{
         "tempo": song.tempo,
         "signature": "%d/%d" % (song.signature_numerator, song.signature_denominator),
         "loop": dict({"on": bool(song.loop)}, bars=lom.bars_text(song, song.loop_start, song.loop_start + song.loop_length)),
         "sections": sections,
         "tracks": tracks,
-        "returns": [{"name": r.name, "volume": lom.shown(r.mixer_device.volume), "devices": [d.name for d in r.devices]}
-                    for r in song.return_tracks],
+        "returns": [dict({"name": r.name, "volume": lom.shown(r.mixer_device.volume), "devices": [d.name for d in r.devices]},
+                         **({"flags": _flags(r)} if _flags(r) else {})) for r in song.return_tracks],
         "master": {"volume": lom.shown(song.master_track.mixer_device.volume),
                    "devices": [d.name for d in song.master_track.devices]},
-    }
+    })
 
 
 def _device(dev, concise):
