@@ -691,40 +691,74 @@ _LOCATOR_QUEUE = []
 
 
 def _next_locator(song, ctrl):
-    """The sequence the old create_locator proved in Live: move the playhead, wait 2 ticks for it to
-    settle, toggle, wait 2 ticks, then name the cue nearest the target (Live may not place it at
-    exactly the beat asked for). Each step is logged to Live's Log.txt as (AbletonMCP) locator ..."""
+    """Live adds or removes a locator at the playhead, but measured on 20.11.2026 it doesn't always put a new
+    one where the playhead is: asked for bar 12 it made bar 13, asked for beat 92 it made 92.6, and a toggle
+    near an existing locator removes that one instead. So each add or remove is checked against the cue list
+    before and after: a new cue is named wherever Live put it, a locator removed by mistake is put back, and
+    the result (target and where it landed) is kept in _LOCATOR_DONE for the tool to report."""
     beat, action, name = _LOCATOR_QUEUE[0]
     log = getattr(ctrl, "log_message", lambda m: None)
+    before = {}
 
-    def done():
+    def times():
+        return {round(c.time, 4): c for c in song.cue_points}
+
+    def done(result):
+        _LOCATOR_DONE.append(result)
+        del _LOCATOR_DONE[:-20]
         _LOCATOR_QUEUE.pop(0)
         if _LOCATOR_QUEUE:
             _next_locator(song, ctrl)
 
-    def name_it():
+    def check():
         try:
+            now = times()
+            added = sorted(set(now) - set(before))
+            removed = sorted(set(before) - set(now))
             if action == "set":
-                near = min(song.cue_points, key=lambda c: abs(c.time - beat), default=None)
-                if near is not None and abs(near.time - beat) < 1.0:
-                    near.name = name
-                log("locator %s at %s: %s" % (action, beat, [(c.name, c.time) for c in song.cue_points]))
+                if added:
+                    landed = added[0]
+                    now[landed].name = name
+                    done({"action": "set", "name": name, "asked_beat": beat, "landed_beat": landed})
+                    return
+                if removed:  # the toggle hit a locator nearby: put it back, then report the miss
+                    back = removed[0]
+                    lost_name = before[back]
+                    song.current_song_time = back
+
+                    def restore():
+                        song.set_or_delete_cue()
+                        ctrl.schedule_message(2, lambda: _rename_at(back, lost_name))
+                    ctrl.schedule_message(2, restore)
+                done({"action": "set", "name": name, "asked_beat": beat, "landed_beat": None,
+                      "error": "Live removed a nearby locator instead of adding one (restored)" if removed else "Live added nothing"})
+            else:
+                done({"action": "delete", "asked_beat": beat, "removed_beat": removed[0] if removed else None,
+                      "error": None if removed else "Live removed nothing"})
         except Exception as e:
-            log("locator name error: %s" % e)
-        finally:
-            done()
+            log("locator check error: %s" % e)
+            done({"action": action, "asked_beat": beat, "error": str(e)})
+
+    def _rename_at(t, n):
+        for c in song.cue_points:
+            if abs(c.time - t) < 1e-3:
+                c.name = n
 
     def toggle():
         try:
+            before.update({t: c.name for t, c in times().items()})
             log("locator toggle at %s (asked %s)" % (song.current_song_time, beat))
             song.set_or_delete_cue()
-            ctrl.schedule_message(2, name_it)
+            ctrl.schedule_message(2, check)
         except Exception as e:
             log("locator toggle error: %s" % e)
-            done()
+            done({"action": action, "asked_beat": beat, "error": str(e)})
 
     song.current_song_time = beat
     ctrl.schedule_message(2, toggle)
+
+
+_LOCATOR_DONE = []
 
 
 def locators(song, p, ctrl):
@@ -732,7 +766,12 @@ def locators(song, p, ctrl):
     added on the next tick (Live adds locators at the playhead), so the reply says pending."""
     action = p.get("action", "list")
     if action == "list":
-        return {"locators": _locators(song)}
+        out = {"locators": _locators(song)}
+        if _LOCATOR_DONE:
+            out["recent"] = [dict(r, asked_bar=lom.bar_of(song, r["asked_beat"]),
+                                  landed_bar=lom.bar_of(song, r["landed_beat"]) if r.get("landed_beat") is not None else None)
+                             for r in _LOCATOR_DONE[-10:]]
+        return out
     if action not in ("set", "delete"):
         raise ValueError("action is list, set or delete, not '%s'" % action)
     if action == "set" and not p.get("name"):

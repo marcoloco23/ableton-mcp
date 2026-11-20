@@ -307,15 +307,21 @@ def register(mcp: Any, get_ableton_connection: Callable[[], Any]) -> None:
         result = call("live_locators", action=action, bar=bar, name=name, locator=locator)
         if "pending" not in result:
             return out(result)
-        for _ in range(10):  # Live needs about 4 ticks (move, settle, toggle, name); poll up to 2 s
+        for _ in range(15):  # Live needs about 4 ticks (move, settle, toggle, check); poll up to 3 s
             time.sleep(0.2)
             listed = call("live_locators", action="list")
-            here = [x for x in listed["locators"] if abs(x["bar"] - result["bar"]) < 0.25]
-            if (action == "set") == bool(here) and not (action == "set" and name and here[0]["name"] != name):
+            mine = [r for r in listed.get("recent", []) if abs(r["asked_bar"] - result["bar"]) < 1e-6]
+            if mine:
                 break
-        if (action == "set") != bool(here) or (action == "set" and name and here[0]["name"] != name):
-            raise ToolError(f"Live did not {'add' if action == 'set' else 'delete'} the locator at bar "
-                            f"{result['bar']:g}; locators now: {listed['locators']}")
+        else:
+            raise ToolError(f"Live did not finish the locator at bar {result['bar']:g} within 3 s; "
+                            f"locators now: {listed['locators']}")
+        r = mine[-1]
+        if r.get("error"):
+            raise ToolError(f"locator at bar {result['bar']:g}: {r['error']}; locators now: {listed['locators']}")
+        if action == "set" and abs(r["landed_bar"] - r["asked_bar"]) > 1e-3:
+            listed["warning"] = (f"Live placed '{name}' at bar {r['landed_bar']:g}, not {r['asked_bar']:g} "
+                                 "(Live snaps new locators; the locator is named where it landed)")
         return out(listed)
 
     @mcp.tool(annotations=_read("Search Live's browser"))
