@@ -275,8 +275,8 @@ def test_automate_takes_a_target(song):
     song.session_automation_record = False
     r = dispatch.execute("automate", {"lanes": [
         {"target": "BASS MID / EQ Eight / 1 Frequency A", "points": [[49, "900 Hz"], [51, "20 kHz"]], "shape": "ease-log"},
-        {"track": "PAD / STAB", "param": "volume", "points": [[49, "0 dB"], [50, "-6 dB"]]}]}, song, NoTick())
-    assert r["lanes"] == ["BASS MID / EQ Eight / 1 Frequency A", "PAD / STAB / volume"]
+        {"track": "PAD / STAB", "param": "send A", "points": [[49, "0 dB"], [50, "-6 dB"]]}]}, song, NoTick())
+    assert r["lanes"] == ["BASS MID / EQ Eight / 1 Frequency A", "PAD / STAB / send A"]
     assert r["windows"] == [[49.0, 51.0]]
     dispatch._AUTOMATE.clear()
 

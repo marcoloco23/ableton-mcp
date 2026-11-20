@@ -99,3 +99,10 @@ def test_live_clips_groove_forwards_the_groove_name():
     call(tools_with(conn), "live_clips", action="groove", track="KICK", bars="1-208", groove="none")
     assert conn.sent == [("live_clips", {"action": "groove", "bars": "1-208", "track": "KICK", "times": 1,
                                          "groove": "none"})]
+
+
+def test_live_automate_takes_a_clear_lane():
+    conn = Conn({})
+    lane = {"target": "PAD / volume", "clear": "41-57", "value": "-4 dB"}
+    call(tools_with(conn), "live_automate", lanes=[lane])
+    assert conn.sent == [("automate", {"lanes": [lane]})]

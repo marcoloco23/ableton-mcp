@@ -1378,6 +1378,10 @@ def _automate_curve(param, points, shape):
     out = []
     for (t0, v0), (t1, v1) in zip(pts, pts[1:]):
         n0, n1, u = num(v0), num(v1), unit(v0) or unit(v1)
+        if abs(n0) >= 1e9 or abs(n1) >= 1e9:
+            # "-inf dB" is -1e9 as a number: eased in dB, a fade from -inf stays at -inf until its last
+            # tick (20.11.2026, PAD silent over bars 41-56). Ease the parameter's raw value instead.
+            n0, n1, u = params.resolve_value(param, v0), params.resolve_value(param, v1), ""
         steps = max(1, int(round((t1 - t0) / _TICK_BEATS)))
         for k in range(steps):
             x = k / float(steps)
@@ -1395,10 +1399,14 @@ def _automate_curve(param, points, shape):
 def _automate(song, p, ctrl):
     """Record a plan of lanes into the arrangement, only over the bars that move.
 
-    lanes: [{"target": "TOP LOOP 2 / Auto Filter / Frequency" | "PAD / volume" | "PAD / send A",
+    lanes: [{"target": "TOP LOOP 2 / Auto Filter / Frequency" | "PAD / Utility / Gain" | "PAD / send A",
              "points": [[49, "900 Hz"], [57, "20 kHz"]], "shape": "ease-log"}]
     (the older {"track": ..., "param": "Auto Filter.Frequency"} form still works)
     Values are what Live shows ("-12 dB", "40 %") or raw numbers. Bars are 1-based.
+    A mixer volume is refused: fades go on a Utility's Gain. {"target": ..., "clear": "41-57" | "all",
+    "value": "-4 dB"} records a flat line over those bars (the whole song with "all") at value, or at
+    the value the parameter holds now: Live's API cannot delete arrangement automation, so this is
+    how a bad lane is undone, mixer volume included.
     Returns at once; automate_status tells progress. Tracks are disarmed while it runs.
     """
     if _AUTOMATE.get("state") == "running":
@@ -1406,13 +1414,26 @@ def _automate(song, p, ctrl):
     lanes = []
     for lane in p["lanes"]:
         if lane.get("target"):
-            param, name = lom.target(song, lane["target"]).param, lane["target"]
+            tg = lom.target(song, lane["target"])
+            track, param, name = tg.track, tg.param, lane["target"]
             if param is None:
                 raise ValueError("'%s' is not a parameter, volume, pan or send" % name)
         else:
-            param = _automate_param(song, lom.track(song, lane["track"]), lane["param"])
-            name = "%s / %s" % (lane["track"], lane["param"])
-        curve = _automate_curve(param, lane["points"], lane.get("shape"))
+            track = lom.track(song, lane["track"])
+            param, name = _automate_param(song, track, lane["param"]), "%s / %s" % (lane["track"], lane["param"])
+        if lane.get("clear"):
+            if lane.get("points"):
+                raise ValueError("'%s': give points or clear, not both" % name)
+            a, b = ((0.0, float(song.song_length)) if str(lane["clear"]).strip().lower() == "all"
+                    else lom.parse_bars(song, lane["clear"]))
+            value = lane.get("value", param.value)  # raw: exactly what it holds now
+            points = [[lom.bar_of(song, a), value], [lom.bar_of(song, b), value]]
+        elif param == track.mixer_device.volume:
+            raise ValueError("'%s': fades go on a Utility's Gain (Marc's rule): add a Utility and automate "
+                             "'%s / Utility / Gain'" % (name, track.name))
+        else:
+            points = lane["points"]
+        curve = _automate_curve(param, points, lane.get("shape"))
         lanes.append({"name": name, "param": param, "curve": curve})
     # windows: the spans that hold moves, merged when they touch
     spans = sorted((l["curve"][0][0], l["curve"][-1][0]) for l in lanes)
@@ -1443,10 +1464,11 @@ def _automate(song, p, ctrl):
         song.stop_playing()
         song.session_automation_record = saved["automation_arm"]
         song.loop = saved["loop"]
-        try:
-            song.re_enable_automation()  # the seek set values by hand; hand control back to the lanes
-        except Exception:
-            pass
+        for l in lanes:  # the seek set values by hand; hand these lanes back to their automation, and
+            try:         # leave every other override in the set alone (song.re_enable_automation would not)
+                l["param"].re_enable_automation()
+            except Exception:
+                pass
         for t in armed:
             t.arm = True
         _AUTOMATE.update({"state": "error" if error else "done", "error": error})

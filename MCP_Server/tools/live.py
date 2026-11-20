@@ -42,6 +42,8 @@ class Lane(TypedDict, total=False):
     target: str
     points: list[list[Any]]
     shape: Literal["linear", "ease", "ease-log"]
+    clear: str
+    value: str | float
 
 
 def _read(title: str) -> ToolAnnotations:
@@ -415,16 +417,23 @@ def register(mcp: Any, get_ableton_connection: Callable[[], Any]) -> None:
 
     @mcp.tool(annotations=_write("Record arrangement automation", destructive=True, idempotent=True))
     def live_automate(ctx: Context, lanes: list[Lane]) -> str:
-        """Record automation into the arrangement: each lane is a target (a parameter, "Track / volume",
-        "Track / pan" or "Track / send A"), points [[bar, value], …] with values as Live shows them, and a
-        shape: linear (default), ease, or ease-log (for frequencies). Live plays only the bars that move,
-        with Arrangement Record and Automation Arm on, moving the knobs the way Push writes automation;
-        Cmd+Z undoes it. Returns at once: poll live_automate_status until state is done.
+        """Record automation into the arrangement: each lane is a target (a parameter, "Track / pan" or
+        "Track / send A"), points [[bar, value], …] with values as Live shows them, and a shape: linear
+        (default), ease, or ease-log (for frequencies); a fade from or to "-inf dB" eases the knob's
+        position. A mixer volume is refused: fades and rides go on a Utility's Gain, so the fader stays
+        free. Live plays only the bars that move, with Arrangement Record and Automation Arm on, moving
+        the knobs the way Push writes automation; Cmd+Z undoes it. Returns at once: poll
+        live_automate_status until state is done.
+
+        Live's API cannot delete arrangement automation. A lane with clear ("41-57", or "all" for the whole
+        song) instead of points records a flat line over those bars, at value or at what the parameter
+        holds now; it is allowed on a mixer volume, to undo an old fade there.
 
         Examples:
           live_automate([{"target": "PAD / Auto Filter / Frequency", "points": [[89, "900 Hz"], [97, "20 kHz"]],
                           "shape": "ease-log"}])
-          live_automate([{"target": "TOPS / volume", "points": [[96, "0 dB"], [97, "-inf dB"]]}])
+          live_automate([{"target": "TOPS / Utility / Gain", "points": [[96, "0 dB"], [97, "-inf dB"]]}])
+          live_automate([{"target": "PAD / volume", "clear": "41-57", "value": "-4 dB"}])   -> a flat line
         """
         return out(call("automate", lanes=lanes))
 

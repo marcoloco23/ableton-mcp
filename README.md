@@ -155,7 +155,7 @@ The conventions are stated once, in the server's instructions:
 | `live_load(track, item, scene, bar, clip)` | Load a device, plugin, preset or sample by name at the end of the chain; with `scene` or `bar`, an audio file as a new clip in that session slot or at that arrangement bar, its clip properties (`pitch_coarse`, `warping`, `name`, …) set in the same call |
 | `live_warp(track, bpm, first_beat_s, bar, scene)` | Warp an audio clip straight: every old marker goes, `first_beat_s` (seconds into the file as Live reads it; an MP3 without a LAME tag keeps its encoder delay, so add ffprobe's `start_time` to a Rekordbox time) lands on beat 0, then one tempo; old markers put back if Live refuses |
 | `live_simpler(simpler, sample, start_ms, end_ms, …)` | Load a sample into a Simpler and set its region, warp, mode, fades |
-| `live_automate(lanes)` / `live_automate_status()` | Record arrangement automation in real time |
+| `live_automate(lanes)` / `live_automate_status()` | Record arrangement automation in real time, over the bars that move; a fade from or to `-inf dB` eases the knob's position; a mixer volume is refused (fades go on a Utility's Gain); a lane with `clear` (`"41-57"` or `"all"`) records a flat line, the only way to undo a lane since Live's API cannot delete arrangement automation |
 | `live_lom(op, path, …)` | Escape hatch: get / set / call / batch on Live's object model by path, with names in brackets: `tracks[BASS MID].devices[EQ Eight].parameters`, `tracks[SUB].arrangement_clips[@113]` |
 | `live_reload_handlers()` | Reload the Remote Script after `deploy.sh` |
 
