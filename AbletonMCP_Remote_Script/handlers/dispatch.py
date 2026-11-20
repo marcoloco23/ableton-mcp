@@ -1379,8 +1379,8 @@ def _automate_curve(param, points, shape):
     for (t0, v0), (t1, v1) in zip(pts, pts[1:]):
         n0, n1, u = num(v0), num(v1), unit(v0) or unit(v1)
         if abs(n0) >= 1e9 or abs(n1) >= 1e9:
-            # "-inf dB" is -1e9 as a number: eased in dB, a fade from -inf stays at -inf until its last
-            # tick (20.11.2026, PAD silent over bars 41-56). Ease the parameter's raw value instead.
+            # "-inf dB" has no number to ease in: a fade from it sat at -inf until its last tick, and one
+            # to it never got there (20.11.2026, PAD silent over bars 41-56). Ease the raw value instead.
             n0, n1, u = params.resolve_value(param, v0), params.resolve_value(param, v1), ""
         steps = max(1, int(round((t1 - t0) / _TICK_BEATS)))
         for k in range(steps):
@@ -1391,8 +1391,8 @@ def _automate_curve(param, points, shape):
             else:
                 n = n0 + (n1 - n0) * e
             out.append((t0 + (t1 - t0) * x, raw(n, u)))
-    t_last, v_last = pts[-1]
-    out.append((t_last, raw(num(v_last), unit(v_last))))
+    t_last, v_last = pts[-1]  # the last point exactly as shown: "-inf dB" is the bottom of the range
+    out.append((t_last, params.resolve_value(param, v_last)))
     return out
 
 
@@ -1507,8 +1507,10 @@ def _automate(song, p, ctrl):
                             v = value_at(l["curve"], now)
                             prm = l["param"]
                             # Live records only a value that changes: a flat lane gets an inaudible
-                            # alternating nudge (a millionth of the range), or nothing is written.
-                            eps = (prm.max - prm.min) * 1e-6 if odd and not prm.is_quantized else 0.0
+                            # alternating nudge (a millionth of the range), or nothing is written. From
+                            # the last point on it holds that point exactly, so a fade ends on -inf.
+                            eps = (prm.max - prm.min) * 1e-6 if (odd and not prm.is_quantized
+                                                                 and now < l["curve"][-1][0]) else 0.0
                             prm.value = min(prm.max, max(prm.min, v + eps)) if v + eps <= prm.max else v - eps
                     _AUTOMATE["ticks"] += 1
                 if now >= b + 0.25:

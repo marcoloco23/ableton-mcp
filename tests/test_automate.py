@@ -86,3 +86,47 @@ def test_clear_all_spans_the_song_at_the_value_given(song):
     assert r["windows"] == [[1.0, 9.0]]
     assert {shown(g, v) for v in live.lanes[id(g)].values()} == {"-4.0 dB"}
     assert shown(g, live.at(g, 1)) == "-4.0 dB" and max(live.lanes[id(g)]) <= 32.5
+
+
+def utility_gain():
+    """Utility's Gain as Live 12 has it: raw -1..1, the bottom shown as -inf dB."""
+    return Param("Gain", lambda v: "-inf dB" if v <= -1 + 1e-9 else "%.1f dB" % (35 * v if v > 0 else 70 * v),
+                 lo=-1.0, hi=1.0, value=0.0)
+
+
+def test_a_fade_from_minus_inf_rises_through_the_values_between():
+    g = utility_gain()
+    curve = dispatch._automate_curve(g, [[41, "-inf dB"], [57, "0 dB"]], "linear")
+    raws = [v for _, v in curve]
+    assert raws[0] == -1.0 and g.str_for_value(raws[-1]).lstrip("-") == "0.0 dB"
+    assert all(a <= b for a, b in zip(raws, raws[1:]))
+    middle = dict(curve)[(49 - 1) * 4.0]
+    assert -0.6 < middle < -0.4 and g.str_for_value(middle) not in ("-inf dB", "0.0 dB")
+
+
+def test_a_fade_to_minus_inf_gets_there_at_its_end():
+    g = utility_gain()
+    curve = dispatch._automate_curve(g, [[177, "-4 dB"], [185, "-inf dB"]], "ease")
+    assert curve[-1] == ((185 - 1) * 4.0, -1.0) and g.str_for_value(curve[-1][1]) == "-inf dB"
+    assert g.str_for_value(curve[0][1]) == "-4.0 dB"
+
+
+def test_an_eased_fade_from_minus_inf_is_still_eased():
+    g = utility_gain()
+    linear = dict(dispatch._automate_curve(g, [[1, "-inf dB"], [2, "0 dB"]], "linear"))
+    eased = dict(dispatch._automate_curve(g, [[1, "-inf dB"], [2, "0 dB"]], "ease"))
+    assert eased[1.0] < linear[1.0] and eased[2.0] == linear[2.0] and eased[3.0] > linear[3.0]  # slow, even, slow
+
+
+def test_a_recorded_fade_to_minus_inf_ends_exactly_on_it():
+    song = demo_song()
+    g = utility_gain()
+    song.tracks[3].devices.append(Device("Utility", [g]))
+    for start in (177, 178):  # either parity of the flat-lane nudge on the last ticks
+        live = Transport(song, [g])
+        live.STEP = 1 / 32.0  # Live's ticks fall anywhere, also in the eighth of a beat after the last point
+        automate(song, live, [{"target": "PAD / STAB / Utility / Gain", "points": [[start, "-4 dB"], [185, "-inf dB"]],
+                               "shape": "ease"}])
+        after = [v for b, v in live.lanes[id(g)].items() if b > (185 - 1) * 4.0]
+        assert after and set(after) == {-1.0}  # never a hair above -inf once the fade is down
+        dispatch._AUTOMATE.clear()
