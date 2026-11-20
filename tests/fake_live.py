@@ -28,9 +28,19 @@ class Param:
         self.value = lo if value is None else value
         self.is_quantized, self.is_enabled = items is not None, True
         self.value_items = list(items or [])
+        self.touched, self.automation_state = False, 0
 
     def str_for_value(self, v):
         return self.value_items[int(v)] if self.is_quantized else self.show(v)
+
+    def begin_gesture(self):
+        self.touched = True
+
+    def end_gesture(self):
+        self.touched = False
+
+    def re_enable_automation(self):
+        self.automation_state = 1 if self.automation_state == 2 else self.automation_state
 
 
 def db(v):  # a fader: 0 is -inf, 0.5 is 0 dB, 1 is +6 dB
@@ -270,6 +280,7 @@ class Song:
         self.signature_numerator, self.signature_denominator = 4, 4
         self.tempo, self.loop, self.loop_start, self.loop_length = 124.0, True, 0.0, 32.0
         self.current_song_time, self.is_playing, self.metronome, self.record_mode = 0.0, False, False, False
+        self.session_automation_record, self.song_length = False, 1024.0
         self.scenes = [Scene("Intro"), Scene("Groove")]
         # as read from a real set, 20.11.2026: song.groove_pool.grooves, each with a name
         self.groove_pool = types.SimpleNamespace(grooves=[Groove(n) for n in (
@@ -321,6 +332,12 @@ class Song:
     def start_playing(self):
         self.is_playing = True
 
+    def re_enable_automation(self):
+        """Song-wide: every overridden parameter in the set follows its automation again."""
+        for t in self.tracks + self.return_tracks:
+            for prm in [t.mixer_device.volume] + [x for d in t.devices for x in d.parameters]:
+                prm.re_enable_automation()
+
     def stop_playing(self):
         self.is_playing = False
 
@@ -330,6 +347,54 @@ class Ctrl:
 
     def schedule_message(self, ticks, fn):
         fn()
+
+
+class Transport(Ctrl):
+    """Live's transport and arrangement automation recording, one tick at a time (a model, not a
+    measurement). A scheduled step runs on a later tick; playing moves the playhead STEP beats a tick.
+    With Arrangement Record and Automation Arm on, a parameter inside a gesture is written at the
+    playhead when its value has changed since the last write (Live records only a value that changes),
+    replacing the points of its lane since that write; a lane holds its first point's value before it.
+    lanes: {param: {beat: raw value}}."""
+
+    STEP = 0.25
+
+    def __init__(self, song, params):
+        self.song, self.params, self.queue, self.tick_no = song, list(params), [], 0
+        self.lanes, self.last = dict((id(prm), {}) for prm in self.params), {}
+
+    def schedule_message(self, ticks, fn):
+        self.queue.append((self.tick_no + ticks, fn))
+
+    def run(self, limit=200000):
+        while self.queue and limit:
+            limit -= 1
+            self.tick_no += 1
+            song = self.song
+            if song.is_playing:
+                song.current_song_time += self.STEP
+            if song.is_playing and song.record_mode and song.session_automation_record:
+                now = song.current_song_time
+                for prm in self.params:
+                    lane, key = self.lanes[id(prm)], id(prm)
+                    if not prm.touched:
+                        self.last.pop(key, None)
+                    elif key not in self.last or self.last[key][1] != prm.value:
+                        since = self.last.get(key, (now, None))[0]
+                        for b in [b for b in lane if since < b <= now]:
+                            del lane[b]
+                        lane[now] = prm.value
+                        self.last[key] = (now, prm.value)
+            due = [q for q in self.queue if q[0] <= self.tick_no]
+            self.queue = [q for q in self.queue if q[0] > self.tick_no]
+            for _, fn in due:
+                fn()
+
+    def at(self, prm, bar):
+        """The lane's value at a bar, as Live plays it back: the last point at or before it."""
+        lane, beat = self.lanes[id(prm)], (bar - 1) * 4.0
+        before = [b for b in sorted(lane) if b <= beat + 1e-9]
+        return lane[before[-1]] if before else lane[min(lane)]
 
 
 def demo_song():
