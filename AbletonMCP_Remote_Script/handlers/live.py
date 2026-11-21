@@ -230,6 +230,13 @@ def _bar(song, beat):
     return "%g" % round(lom.bar_of(song, beat), 2)
 
 
+def _last_bar(song, end):
+    """Where a span ending at beat ``end`` stops, the way bars are counted: its last bar when it ends on a bar line
+    (a clip to beat 832 runs to bar 208), else the position ("112.75")."""
+    b = lom.bar_of(song, end)
+    return "%d" % (round(b) - 1) if abs(b - round(b)) < 1e-6 else "%g" % round(b, 2)
+
+
 def _issues(song, sound):
     """[(check, one line)], in the order they cost work."""
     ts, out = sound.tracks, []
@@ -247,7 +254,7 @@ def _issues(song, sound):
         out.append(("short clips", "clips under a 16th, all but silent: " + _listed(short)))
     cues = dict((c.name.strip().upper(), c.time) for c in song.cue_points)
     if "END" in cues:
-        past = ["%s to %s" % (t.name, _bar(song, max(c.end_time for c in _clips(t))))
+        past = ["%s to %s" % (t.name, _last_bar(song, max(c.end_time for c in _clips(t))))
                 for t in ts if any(c.end_time > cues["END"] + 1e-6 for c in _clips(t))]
         if past:
             out.append(("past END", "clips run past the END locator (bar %s): %s" % (_bar(song, cues["END"]),
