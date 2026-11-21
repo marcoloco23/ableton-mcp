@@ -519,7 +519,8 @@ def register(mcp: Any, get_ableton_connection: Callable[[], Any]) -> None:
         on Live's meter scale (the fader's; not LUFS), in the mixer's hierarchy: groups and ungrouped tracks loudest
         first, each group's tracks under it. A track with Kickstart or a sidechained compressor gets its pump: the dip
         in dB on each kick and how long until it is back within 1 dB, against the kick group (else the kick track;
-        or `kick`). tracks narrows the answer (a group brings its tracks); every track is metered either way.
+        or `kick`); the median over the kicks the track sounds across, with the IQR of the dips, and "not
+        measurable" when it sounds across fewer than half (a sparse bass: its gaps are not a duck). tracks narrows the answer (a group brings its tracks); every track is metered either way.
         Refused while anything is soloed, and while the transport plays unless follow=True, which meters the bars
         as Live plays through them and touches nothing.
 

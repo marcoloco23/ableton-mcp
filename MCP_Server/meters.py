@@ -12,10 +12,13 @@ Live's fader. `level` is the mean of the meter on that scale, `peak` its highest
 beat. None of them is LUFS or RMS: compare tracks with each other, and use `dj produce hear` for loudness.
 UNCONFIRMED until checked in Live against a recorded take of the same bars.
 
-Pump. A track carrying Kickstart or a compressor with its sidechain on is measured on every kick of the kick
+Pump. A track carrying Kickstart or a compressor with its sidechain on is measured on the kicks of the kick
 reference (the kick group, else the kick track): how far it dips below where it sat just before the kick, and how
-long after the kick it is back within 1 dB. The meter's own release smooths a short, deep duck, so a dip reads at
-most as deep as the meter can fall in that time.
+long after the kick it is back within 1 dB. Only a kick the track sounds across counts: on a sparse part a dip
+measures the gap between two notes, not the duck (21.11.2026, Serenity's 16th-note bass read "pump 10.1 dB
+(-45.5-38.7)"). Depth and recovery are medians over the kicks that count, the spread their middle half; with fewer
+than half the kicks counting the pump is not measurable. The meter's own release smooths a short, deep duck, so a
+dip reads at most as deep as the meter can fall in that time.
 """
 
 from __future__ import annotations
@@ -28,6 +31,7 @@ from typing import Any, Callable
 FLOOR_DB = -70.0      # what -inf reads as inside the pump arithmetic
 KICK_RISE_DB = 4.0    # a kick: the kick meter jumps at least this far above its low of the last quarter beat
 BACK_DB = 1.0         # "back": within this of the level just before the kick
+SOUNDS_DB = 20.0      # "sounds": no more than this under the track's loud level (its 90th percentile); lower is a gap
 SPARK = "▁▂▃▄▅▆▇█"
 SPARK_DB = (-40.0, 0.0)
 
@@ -100,8 +104,11 @@ def kick_onsets(beats: list[float], kdb: list[float]) -> list[int]:
 
 
 def pump(beats: list[float], tdb: list[float], kicks: list[int], spb: float) -> dict | None:
-    """Per kick: the dip below the level just before it and how long until the track is back within BACK_DB."""
-    dips = []
+    """Per kick the track sounds across: the dip below the level just before it and how long until it is back within
+    BACK_DB. It sounds across a kick when every reading from a quarter beat before it to the next kick is above
+    SOUNDS_DB under the track's loud level: a gap anywhere there would be read as the dip or as the level before."""
+    floor = sorted(tdb)[int(0.9 * (len(tdb) - 1))] - SOUNDS_DB
+    looked, dips = 0, []
     for n, k in enumerate(kicks):
         t = (beats[k] + beats[k + 1]) / 2 if k + 1 < len(beats) else beats[k]  # it hit between the low and the jump
         end = beats[kicks[n + 1]] if n + 1 < len(kicks) else t + 1.0
@@ -109,17 +116,25 @@ def pump(beats: list[float], tdb: list[float], kicks: list[int], spb: float) -> 
         after = [j for j in range(len(beats)) if t < beats[j] < end]
         if not before or not after:
             continue
+        looked += 1
+        if min(before) < floor or min(tdb[j] for j in after) < floor:
+            continue  # a gap between notes, not the duck
         base = max(before)
         low = min(after, key=lambda j: tdb[j])
         back = next((j for j in after if beats[j] > beats[low] and tdb[j] >= base - BACK_DB), None)
         dips.append({"beat": round(t, 3), "dip_db": round(base - tdb[low], 1),
                      "back_ms": round((beats[back] - t) * spb * 1000) if back is not None else None})
-    if not dips:
+    if not looked:
         return None
+    out = {"kicks": looked, "measured": len(dips), "dip_db": None, "dip_iqr_db": None, "back_ms": None, "back_on": 0,
+           "dips": dips}
+    if len(dips) * 2 < looked:
+        return out  # mostly gaps
     depth = [d["dip_db"] for d in dips]
     backs = [d["back_ms"] for d in dips if d["back_ms"] is not None]
-    return {"kicks": len(dips), "dip_db": round(statistics.median(depth), 1), "dip_range_db": [min(depth), max(depth)],
-            "back_ms": round(statistics.median(backs)) if backs else None, "back_on": len(backs), "dips": dips}
+    q1, _, q3 = statistics.quantiles(depth, n=4, method="inclusive") if len(depth) > 1 else depth * 3
+    return dict(out, dip_db=round(statistics.median(depth), 1), dip_iqr_db=[round(q1, 1), round(q3, 1)],
+                back_ms=round(statistics.median(backs)) if backs else None, back_on=len(backs))
 
 
 def _kick_reference(rows: list[dict], name: str | None) -> dict | None:
@@ -253,11 +268,15 @@ def _pump_text(r: dict) -> str:
     p, devs = r.get("pump"), ", ".join(r["pump_devices"])
     if p is None:
         return f"pump: no kicks heard to measure ({devs})"
-    back = (f", back within {BACK_DB:g} dB after {p['back_ms']} ms ({p['back_on']} of {p['kicks']})"
+    if p["dip_db"] is None:
+        return (f"pump not measurable: it sounds across {p['measured']} of {p['kicks']} kicks, mostly gaps between "
+                f"notes · {devs}")
+    back = (f", back within {BACK_DB:g} dB after {p['back_ms']} ms ({p['back_on']} of {p['measured']})"
             if p["back_ms"] is not None else ", not back before the next kick")
-    lo, hi = p["dip_range_db"]
-    spread = f" ({lo:.1f}-{hi:.1f})" if hi - lo >= 0.1 else ""
-    return f"pump {p['dip_db']:.1f} dB{spread} on {p['kicks']} kicks{back} · {devs}"
+    lo, hi = p["dip_iqr_db"]
+    spread = f" (IQR {lo:.1f}-{hi:.1f})" if hi - lo >= 0.1 else ""
+    on = f"{p['kicks']}" if p["measured"] == p["kicks"] else f"{p['measured']} of {p['kicks']}"
+    return f"pump {p['dip_db']:.1f} dB{spread} on {on} kicks{back} · {devs}"
 
 
 def render(s: dict) -> str:
