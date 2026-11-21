@@ -1,7 +1,7 @@
 """The live_* commands on a fake Live set: whole jobs by name and bar."""
 import pytest
 
-from fake_live import Clip, Ctrl, Note, Slot, Track, demo_song, live, lom, take_input
+from fake_live import Clip, Ctrl, Cue, Device, Note, Param, Routing, Scene, Slot, Track, demo_song, live, lom, take_input
 
 
 @pytest.fixture
@@ -17,7 +17,7 @@ def run(fn, song, **p):
 
 def test_set_reports_before_and_after_as_shown(song):
     r = run(live.set_values, song, changes=[
-        {"target": "BASS MID / EQ Eight / 1 Filter Type A", "value": "High Pass 48dB"},
+        {"target": "BASS MID / EQ Eight / 1 Filter Type A", "value": "Bell"},
         {"target": "BASS MID / EQ Eight / 1 Frequency A", "value": "110 Hz"},
         {"target": "BASS MID / volume", "value": "-6 dB"},
         {"target": "BASS MID / pan", "value": "25L"},
@@ -27,7 +27,7 @@ def test_set_reports_before_and_after_as_shown(song):
         {"target": "BASS MID / monitor", "value": "off"},
         {"target": "BASS MID / EQ Eight", "value": "off"}])["changed"]
     assert [(c["before"], c["after"]) for c in r] == [
-        ("Low Cut 48dB", "High Pass 48dB"), ("20 Hz", "110 Hz"), ("0.0 dB", "-6.0 dB"), ("C", "25L"),
+        ("High Pass 48dB", "Bell"), ("20 Hz", "110 Hz"), ("0.0 dB", "-6.0 dB"), ("C", "25L"),
         ("-inf dB", "-inf dB"), ("Master", "🎸 BASS"), ("off", "on"), ("Auto", "Off"), ("On", "Off")]
     t = song.tracks[0]
     assert t.mixer_device.sends[0].value == 0.0 and t.current_monitoring_state == 2
@@ -353,6 +353,68 @@ def test_a_solo_comes_first_and_the_sections_say_what_it_silences(song):
     assert o["tracks"][1]["flags"] == ["solo"] and o["tracks"][0]["flags"] == ["silenced by solo"]
     assert o["returns"][0]["flags"] == ["silenced by solo"]
     assert "warning" in run(live.overview, song, response_format="detailed")
+
+
+# --- the audit -------------------------------------------------------------------------------
+
+def audited(song):
+    return dict((i["check"], i["text"]) for i in run(live.audit, song)["issues"])
+
+
+def test_audit_names_what_trips_the_work_up(song):
+    """21.11.2026, Serenity: four tracks named HOOK, a REV CRASH clip 0 beats long at bar 145, an OPEN HAT seat
+    with its Simpler loaded duplicated, leftovers of a recording and a candidates round, clips past END."""
+    song.tracks += [Track("HOOK"), Track("HOOK"), Track("HOOK"), Track("REV CRASH", audio=True),
+                    Track("OPEN HAT", [Device("Simpler", type=1)]), Track("REC KICK", audio=True), Track("KICK CAND", audio=True)]
+    song.tracks[-4].arrangement_clips = [Clip("rev", 576.0, 576.0), Clip("rev", 380.0, 384.0)]
+    song.tracks[1].arrangement_clips.append(Clip("tail", 816.0, 832.0, [Note(38, 0.0, 1.0)]))
+    song.cue_points += [Cue("START", 0.0), Cue("END", 816.0)]
+    song.scenes += [Scene("CANDIDATES 1"), Scene("CANDIDATES 2")]
+    song.tracks[4].mute = True
+    take_input(song.tracks[0], song.tracks[1])  # BASS MID plays SERUM BASS: no seat
+    a = audited(song)
+    names = [i["text"] for i in run(live.audit, song)["issues"] if i["check"] == "duplicate names"]
+    assert names[0].startswith("2 tracks named 'Drums' (tracks 5, 6)")  # the demo's two Drums
+    assert names[1] == ("3 tracks named 'HOOK' (tracks 7, 8, 9): live_track and the recorder refuse the name; say "
+                        "'HOOK#1', 'HOOK#2', 'HOOK#3'")
+    assert lom.track(song, "HOOK#2") is song.tracks[7]  # the form the line gives addresses the track
+    assert a["short clips"] == "clips under a 16th, all but silent: REV CRASH at 145 (0 beats)"
+    assert a["past END"] == "clips run past the END locator (bar 205): SERUM BASS to 209"
+    assert "locators" not in a
+    assert a["leftovers"] == ("tracks REC KICK, KICK CAND; scenes CANDIDATES 1, CANDIDATES 2: left by a recording or a "
+                              "candidates round")
+    assert a["muted"] == "muted: Drums"
+    assert a["unused seats"].endswith("adding a track): DRUMS, OPEN HAT")  # a Drum Rack and a Simpler, no clip
+    assert "solo" not in a
+
+
+def test_audit_says_a_missing_locator_and_the_solo(song):
+    song.tracks[1].solo = True
+    a = audited(song)
+    assert a["locators"] == "no START or END locator"
+    assert a["solo"].startswith("SOLO IS ON: 'SERUM BASS' soloed")
+
+
+def test_the_sidechain_map_groups_by_what_keys_it(song):
+    comp = Device("Compressor", [Param("S/C On", items=["Off", "On"], value=1.0)], class_name="Compressor2")
+    comp.input_routing_type, comp.input_routing_channel = Routing("👊 KICK"), Routing("Post FX")
+    off = Device("Compressor", [Param("S/C On", items=["Off", "On"], value=0.0)], class_name="Compressor2")
+    glue = Device("Glue Compressor", [Param("S/C On", items=["Off", "On"], value=1.0)], class_name="GlueCompressor")
+    song.tracks[3].devices += [Device("Kickstart 2", class_name="PluginDevice"), comp]
+    song.tracks[0].devices += [Device("Kickstart 2", class_name="PluginDevice"), off]
+    song.return_tracks[0].devices.append(glue)
+    assert run(live.audit, song)["sidechain"] == [
+        {"device": "Kickstart 2", "keyed_by": None, "tracks": ["BASS MID", "PAD / STAB"]},
+        {"device": "Compressor", "keyed_by": "👊 KICK / Post FX", "tracks": ["PAD / STAB"]},
+        {"device": "Glue Compressor", "keyed_by": None, "tracks": ["A-Reverb"]}]
+
+
+def test_the_overview_carries_the_audit_lines_and_says_the_solo_once(song):
+    song.tracks[1].solo = True
+    o = run(live.overview, song)
+    assert list(o)[:3] == ["warning", "soloed", "audit"]
+    assert o["audit"][0] == "2 tracks named 'Drums' (tracks 5, 6): live_track and the recorder refuse the name; say 'Drums#1', 'Drums#2'"
+    assert not any(line.startswith("SOLO") for line in o["audit"])
 
 
 def test_track_reads_every_shown_value_or_one_device(song):

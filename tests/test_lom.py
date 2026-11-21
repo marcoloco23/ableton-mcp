@@ -27,7 +27,7 @@ def test_names_numbers_and_prefixes_reach_the_same_parameter(song):
     assert by_name == get(song, "song.tracks.0.devices.0.parameters.2")
     assert by_name == get(song, "tracks[bass mid].devices[eq eight].parameters[1 frequency a]")
     assert by_name["display"] == "20 Hz" and set(by_name) == {"name", "value", "display", "min", "max", "quantized"}
-    assert get(song, "tracks[BASS MID].devices[EQ Eight].parameters[1 Filter Type A]")["items"][3] == "High Pass 48dB"
+    assert get(song, "tracks[BASS MID].devices[EQ Eight].parameters[1 Filter Type A]")["items"][1] == "High Pass 12dB"
 
 
 def test_a_miss_lists_the_names_and_the_close_ones(song):

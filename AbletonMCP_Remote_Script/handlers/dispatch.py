@@ -6,6 +6,7 @@ Toggle control surface off/on to pick up changes.
 
 from __future__ import absolute_import, print_function, unicode_literals
 
+import bisect
 import re
 from . import tracks, browser, devices, arrangement, audio, automation, params, lom, live
 
@@ -1178,6 +1179,10 @@ def _get_registry():
             "handler": live.overview,
             "modifying": True,
         },
+        "live_audit": {
+            "handler": live.audit,
+            "modifying": True,
+        },
         "live_track": {
             "handler": live.track,
             "modifying": True,
@@ -1232,6 +1237,10 @@ def _get_registry():
         },
         "automate": {
             "handler": lambda song, p, ctrl: _automate(song, p, ctrl),
+            "modifying": True,
+        },
+        "automate_check": {
+            "handler": lambda song, p, ctrl: _automate_check(song, p, ctrl),
             "modifying": True,
         },
         "automate_status": {
@@ -1306,7 +1315,7 @@ def _simpler_region(song, p, ctrl):
 
 
 # Jobs that can outlast the usual 10 s on Live's main thread (a big set, a browser scan, many clips).
-_LONG = ("lom_batch", "live_overview", "live_track", "live_notes_read", "live_notes_write", "live_clips", "live_load")
+_LONG = ("lom_batch", "live_overview", "live_audit", "live_track", "live_notes_read", "live_notes_write", "live_clips", "live_load")
 
 
 def timeout(command_type):
@@ -1396,23 +1405,11 @@ def _automate_curve(param, points, shape):
     return out
 
 
-def _automate(song, p, ctrl):
-    """Record a plan of lanes into the arrangement, only over the bars that move.
-
-    lanes: [{"target": "TOP LOOP 2 / Auto Filter / Frequency" | "PAD / Utility / Gain" | "PAD / send A",
-             "points": [[49, "900 Hz"], [57, "20 kHz"]], "shape": "ease-log"}]
-    (the older {"track": ..., "param": "Auto Filter.Frequency"} form still works)
-    Values are what Live shows ("-12 dB", "40 %") or raw numbers. Bars are 1-based.
-    A mixer volume is refused: fades go on a Utility's Gain. {"target": ..., "clear": "41-57" | "all",
-    "value": "-4 dB"} records a flat line over those bars (the whole song with "all") at value, or at
-    the value the parameter holds now: Live's API cannot delete arrangement automation, so this is
-    how a bad lane is undone, mixer volume included.
-    Returns at once; automate_status tells progress. Tracks are disarmed while it runs.
-    """
-    if _AUTOMATE.get("state") == "running":
-        raise RuntimeError("automate is already running")
+def _automate_lanes(song, plan):
+    """A plan's lanes as [{name, param, curve}], each lane {"target": "PAD / Utility / Output"} or the older
+    {"track": "PAD", "param": "Utility.Output"}; the curve is _automate_curve's, the one recorded."""
     lanes = []
-    for lane in p["lanes"]:
+    for lane in plan:
         if lane.get("target"):
             tg = lom.target(song, lane["target"])
             track, param, name = tg.track, tg.param, lane["target"]
@@ -1429,12 +1426,50 @@ def _automate(song, p, ctrl):
             value = lane.get("value", param.value)  # raw: exactly what it holds now
             points = [[lom.bar_of(song, a), value], [lom.bar_of(song, b), value]]
         elif param == track.mixer_device.volume:
-            raise ValueError("'%s': fades go on a Utility's Gain (Marc's rule): add a Utility and automate "
-                             "'%s / Utility / Gain'" % (name, track.name))
+            raise ValueError("'%s': fades go on a Utility's Output, its gain (Marc's rule): add a "
+                             "Utility and automate '%s / Utility / Output'" % (name, track.name))
         else:
             points = lane["points"]
         curve = _automate_curve(param, points, lane.get("shape"))
         lanes.append({"name": name, "param": param, "curve": curve})
+    return lanes
+
+
+def _automate_check(song, p, ctrl):
+    """Read-only, during playback: where the playhead is and, per lane of a plan, what the control holds against the
+    plan's curve there (_automate_curve's, the one recorded, eased or not). off is the distance as a fraction of
+    the control's range; None for a switch or menu."""
+    now = song.current_song_time
+    rows = []
+    for l in _automate_lanes(song, p["lanes"]):
+        prm, curve = l["param"], l["curve"]
+        k = bisect.bisect_right([t for t, _ in curve], now)
+        if k == 0 or k == len(curve):
+            want = curve[0][1] if k == 0 else curve[-1][1]
+        else:
+            (t0, v0), (t1, v1) = curve[k - 1], curve[k]
+            want = v0 + (v1 - v0) * (now - t0) / (t1 - t0) if t1 > t0 else v1
+        rows.append({"name": l["name"], "shown": lom.shown(prm), "plan": str(prm.str_for_value(want)),
+                     "off": None if prm.is_quantized else abs(prm.value - want) / ((prm.max - prm.min) or 1.0)})
+    return {"bar": lom.bar_of(song, now), "playing": bool(song.is_playing), "lanes": rows}
+
+
+def _automate(song, p, ctrl):
+    """Record a plan of lanes into the arrangement, only over the bars that move.
+
+    lanes: [{"target": "TOP LOOP 2 / Auto Filter / Frequency" | "PAD / Utility / Output" | "PAD / send A",
+             "points": [[49, "900 Hz"], [57, "20 kHz"]], "shape": "ease-log"}]
+    (the older {"track": ..., "param": "Auto Filter.Frequency"} form still works)
+    Values are what Live shows ("-12 dB", "40 %") or raw numbers. Bars are 1-based.
+    A mixer volume is refused: fades go on a Utility's Output, its gain. {"target": ..., "clear": "41-57" | "all",
+    "value": "-4 dB"} records a flat line over those bars (the whole song with "all") at value, or at
+    the value the parameter holds now: Live's API cannot delete arrangement automation, so this is
+    how a bad lane is undone, mixer volume included.
+    Returns at once; automate_status tells progress. Tracks are disarmed while it runs.
+    """
+    if _AUTOMATE.get("state") == "running":
+        raise RuntimeError("automate is already running")
+    lanes = _automate_lanes(song, p["lanes"])
     # windows: the spans that hold moves, merged when they touch
     spans = sorted((l["curve"][0][0], l["curve"][-1][0]) for l in lanes)
     windows = []

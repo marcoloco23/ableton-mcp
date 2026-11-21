@@ -8,7 +8,7 @@ from handlers import dispatch
 @pytest.fixture
 def song():
     s = demo_song()
-    s.tracks[3].devices.append(Device("Utility", [Param("Gain", db, value=0.5)]))  # PAD / STAB
+    s.tracks[3].devices.append(Device("Utility", [Param("Output", db, value=0.5)]))  # PAD / STAB
     yield s
     dispatch._AUTOMATE.clear()
 
@@ -32,14 +32,14 @@ def test_a_fade_from_minus_inf_is_heard_on_its_way_up_and_a_second_call_leaves_i
     """20.11.2026: eased in dB, -inf -> -4 dB stayed at -inf until its last tick (PAD silent over bars 41-56)."""
     g = gain(song)
     live = Transport(song, [g])
-    automate(song, live, [{"target": "PAD / STAB / Utility / Gain", "points": [[41, "-inf dB"], [57, "-4 dB"]],
+    automate(song, live, [{"target": "PAD / STAB / Utility / Output", "points": [[41, "-inf dB"], [57, "-4 dB"]],
                            "shape": "ease"}])
     first = dict(live.lanes[id(g)])
     assert shown(g, live.at(g, 41)) == "-inf dB"
     assert -30 < float(shown(g, live.at(g, 51)).split()[0]) < -4  # on its way up, not silent
     assert shown(g, live.at(g, 58)) == "-4.0 dB"
 
-    automate(song, live, [{"target": "PAD / STAB / Utility / Gain", "points": [[177, "-4 dB"], [185, "-inf dB"]],
+    automate(song, live, [{"target": "PAD / STAB / Utility / Output", "points": [[177, "-4 dB"], [185, "-inf dB"]],
                            "shape": "ease"}])
     lane = live.lanes[id(g)]
     assert {b: v for b, v in lane.items() if b < 176 * 4} == {b: v for b, v in first.items() if b < 176 * 4}
@@ -50,18 +50,18 @@ def test_a_fade_from_minus_inf_is_heard_on_its_way_up_and_a_second_call_leaves_i
 def test_the_job_hands_back_only_its_own_lanes(song):
     g, other = gain(song), song.tracks[0].mixer_device.volume
     other.automation_state = g.automation_state = 2  # both overridden by hand
-    automate(song, Transport(song, [g]), [{"target": "PAD / STAB / Utility / Gain", "points": [[3, "0 dB"], [4, "-6 dB"]]}])
+    automate(song, Transport(song, [g]), [{"target": "PAD / STAB / Utility / Output", "points": [[3, "0 dB"], [4, "-6 dB"]]}])
     assert g.automation_state == 1 and other.automation_state == 2  # the other override stays
 
 
 def test_mixer_volume_is_refused_with_marcs_rule(song):
     for lane in ({"target": "PAD / STAB / volume", "points": [[3, "0 dB"], [4, "-6 dB"]]},
                  {"track": "PAD / STAB", "param": "volume", "points": [[3, "0 dB"], [4, "-6 dB"]]}):
-        with pytest.raises(ValueError, match=r"fades go on a Utility's Gain \(Marc's rule\): add a Utility and "
-                                             r"automate 'PAD / STAB / Utility / Gain'"):
+        with pytest.raises(ValueError, match=r"fades go on a Utility's Output, its gain \(Marc's rule\): add a "
+                                             r"Utility and automate 'PAD / STAB / Utility / Output'"):
             dispatch.execute("automate", {"lanes": [lane]}, song, Transport(song, []))
         assert dispatch._AUTOMATE.get("state") != "running"
-    with pytest.raises(ValueError, match="Utility's Gain"):
+    with pytest.raises(ValueError, match="Utility's Output"):
         dispatch.execute("automate", {"lanes": [{"target": "Master / volume", "points": [[1, "0 dB"], [2, "-1 dB"]]}]},
                          song, Transport(song, []))
 
@@ -82,15 +82,15 @@ def test_clear_all_spans_the_song_at_the_value_given(song):
     g = gain(song)
     song.song_length = 32.0
     live = Transport(song, [g])
-    r = automate(song, live, [{"target": "PAD / STAB / Utility / Gain", "clear": "all", "value": "-4 dB"}])
+    r = automate(song, live, [{"target": "PAD / STAB / Utility / Output", "clear": "all", "value": "-4 dB"}])
     assert r["windows"] == [[1.0, 9.0]]
     assert {shown(g, v) for v in live.lanes[id(g)].values()} == {"-4.0 dB"}
     assert shown(g, live.at(g, 1)) == "-4.0 dB" and max(live.lanes[id(g)]) <= 32.5
 
 
 def utility_gain():
-    """Utility's Gain as Live 12 has it: raw -1..1, the bottom shown as -inf dB."""
-    return Param("Gain", lambda v: "-inf dB" if v <= -1 + 1e-9 else "%.1f dB" % (35 * v if v > 0 else 70 * v),
+    """Utility's gain as Live 12.4 has it, named Output: raw -1..1, the bottom shown as -inf dB."""
+    return Param("Output", lambda v: "-inf dB" if v <= -1 + 1e-9 else "%.1f dB" % (35 * v if v > 0 else 70 * v),
                  lo=-1.0, hi=1.0, value=0.0)
 
 
@@ -125,8 +125,29 @@ def test_a_recorded_fade_to_minus_inf_ends_exactly_on_it():
     for start in (177, 178):  # either parity of the flat-lane nudge on the last ticks
         live = Transport(song, [g])
         live.STEP = 1 / 32.0  # Live's ticks fall anywhere, also in the eighth of a beat after the last point
-        automate(song, live, [{"target": "PAD / STAB / Utility / Gain", "points": [[start, "-4 dB"], [185, "-inf dB"]],
+        automate(song, live, [{"target": "PAD / STAB / Utility / Output", "points": [[start, "-4 dB"], [185, "-inf dB"]],
                                "shape": "ease"}])
         after = [v for b, v in live.lanes[id(g)].items() if b > (185 - 1) * 4.0]
         assert after and set(after) == {-1.0}  # never a hair above -inf once the fade is down
         dispatch._AUTOMATE.clear()
+
+
+def test_the_check_reads_the_recorded_curve_eased_and_in_both_lane_forms():
+    """check_automation assumed straight midpoints in shown units and only {track, param} lanes: an eased fade from
+    -inf failed (want -100 "dB") and a target lane raised KeyError. It now asks for _automate_curve's own value
+    at the playhead."""
+    song = demo_song()
+    g = utility_gain()
+    song.tracks[3].devices.append(Device("Utility", [g]))
+    points = [[41, "-inf dB"], [57, "0 dB"]]
+    live = Transport(song, [g])
+    automate(song, live, [{"target": "PAD / STAB / Utility / Output", "points": points, "shape": "ease"}])
+    lanes = [{"target": "PAD / STAB / Utility / Output", "points": points, "shape": "ease"},
+             {"track": "PAD / STAB", "param": "Utility.Output", "points": points, "shape": "ease"}]
+    for bar in (43, 45, 49, 53):
+        song.current_song_time, g.value = (bar - 1) * 4.0, live.at(g, bar)  # playback: what was recorded
+        r = dispatch.execute("automate_check", {"lanes": lanes}, song, live)
+        assert r["bar"] == bar and [x["name"] for x in r["lanes"]] == ["PAD / STAB / Utility / Output", "PAD / STAB / Utility.Output"]
+        assert all(x["off"] < 0.01 for x in r["lanes"]), r
+    song.current_song_time, g.value = 44 * 4.0, -0.75  # a straight line's value a quarter of the way: not what was eased
+    assert dispatch.execute("automate_check", {"lanes": lanes[:1]}, song, live)["lanes"][0]["off"] > 0.03

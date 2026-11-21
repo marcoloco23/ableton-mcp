@@ -262,7 +262,7 @@ def test_a_save_in_live_while_the_lanes_are_written_leaves_live_where_it_is(live
     assert S.load(path).find(".//AutomationEnvelope") is None
 
 
-@pytest.mark.parametrize("target, why", [("PAD / volume", "Utility's Gain"), ("PAD / Utility / Mute", "switch"),
+@pytest.mark.parametrize("target, why", [("PAD / volume", "Utility's Output"), ("PAD / Utility / Mute", "switch"),
                                          ("PAD / Utility / Width", "no parameter"), ("NOPE / send A", "no track")])
 def test_what_it_refuses(live_set, target, why):
     path, prefs, conn = live_set()

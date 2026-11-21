@@ -11,6 +11,7 @@ import bisect
 import collections
 import math
 import os
+import re
 import time
 
 from . import lom, params
@@ -205,11 +206,119 @@ class Sound(object):
                 "what is soloed; unsolo before recording." % (", ".join("'%s'" % n for n in self.soloed), quiet))
 
 
+# --- the audit: what in the set trips the work up, before any work ---------------------------
+#
+# Each check comes from a day it cost: four tracks named HOOK (the recorder and live_track refuse the
+# name), a REV CRASH clip at bar 145 0 beats long and silent, an OPEN HAT seat with its Simpler loaded
+# duplicated because it had no clip (21.11.2026), REC / CAND tracks and CANDIDATES scenes left behind,
+# SERUM soloed all evening (20.11.2026), clips running past the END locator. One place: live_audit,
+# live_overview's "audit" lines, and through them dj produce audit, map, track context and checklist.
+
+SHORT_BEATS = 0.25    # an arrangement clip shorter than a 16th is all but silent
+TEMP_TRACK = re.compile(r"^(REC|CAND|BUILD LOOP)\b|\bCAND$")   # live_record's REC, candidates' CAND / KICK CAND
+TEMP_SCENE = re.compile(r"^CANDIDATES\b")
+INSTRUMENT = 1        # Live's DeviceType.instrument: Simpler, Sampler, Drum and Instrument Racks, plug-in instruments
+SIDECHAIN_ON = ("S/C On", "Sidechain On")
+
+
+def _listed(names, most=12):
+    names = list(names)
+    return ", ".join(names[:most]) + (" … (%d in all)" % len(names) if len(names) > most else "")
+
+
+def _bar(song, beat):
+    return "%g" % round(lom.bar_of(song, beat), 2)
+
+
+def _issues(song, sound):
+    """[(check, one line)], in the order they cost work."""
+    ts, out = sound.tracks, []
+    at = collections.OrderedDict()
+    for k, t in enumerate(ts):
+        at.setdefault(t.name, []).append(k + 1)
+    for name, ks in at.items():
+        if len(ks) > 1:
+            out.append(("duplicate names", "%d tracks named '%s' (tracks %s): live_track and the recorder refuse the "
+                        "name; say %s" % (len(ks), name, ", ".join(map(str, ks)),
+                                          ", ".join("'%s#%d'" % (name, n + 1) for n in range(len(ks))))))
+    short = ["%s at %s (%g beats)" % (t.name, _bar(song, c.start_time), round(c.end_time - c.start_time, 3))
+             for t in ts for c in _clips(t) if c.end_time - c.start_time < SHORT_BEATS]
+    if short:
+        out.append(("short clips", "clips under a 16th, all but silent: " + _listed(short)))
+    cues = dict((c.name.strip().upper(), c.time) for c in song.cue_points)
+    if "END" in cues:
+        past = ["%s to %s" % (t.name, _bar(song, max(c.end_time for c in _clips(t))))
+                for t in ts if any(c.end_time > cues["END"] + 1e-6 for c in _clips(t))]
+        if past:
+            out.append(("past END", "clips run past the END locator (bar %s): %s" % (_bar(song, cues["END"]),
+                                                                                    _listed(past))))
+    missing = [n for n in ("START", "END") if n not in cues]
+    if missing:
+        out.append(("locators", "no %s locator" % " or ".join(missing)))
+    temp = [t.name for t in ts if TEMP_TRACK.search(t.name)]
+    temp_scenes = [s.name for s in song.scenes if TEMP_SCENE.match(s.name.strip())]
+    if temp or temp_scenes:
+        out.append(("leftovers", "; ".join(x for x in ("tracks " + _listed(temp) if temp else "",
+                                                       "scenes " + _listed(temp_scenes, 4) if temp_scenes else "") if x)
+                    + ": left by a recording or a candidates round"))
+    if sound.soloed:
+        out.append(("solo", sound.warning()))
+    muted = [t.name for t in ts + list(song.return_tracks) if _on(t, "mute")]
+    if muted:
+        out.append(("muted", "muted: " + _listed(muted)))
+    seats = [t.name for k, t in enumerate(ts) if not sound.group[k] and sound.via[k] is None and not _clips(t)
+             and not TEMP_TRACK.search(t.name) and any(getattr(d, "type", 0) == INSTRUMENT for d in t.devices)]
+    if seats:
+        out.append(("unused seats", "an instrument loaded, no clip in the arrangement (use the seat before adding a "
+                    "track): " + _listed(seats)))
+    return out
+
+
+def _all_devices(devices):
+    for d in devices:
+        yield d
+        if getattr(d, "can_have_chains", False):
+            for c in d.chains:
+                for x in _all_devices(c.devices):
+                    yield x
+
+
+def _sidechains(song):
+    """[{device, keyed_by, tracks}]: every Kickstart, and every device with its sidechain switched on, by what keys it.
+    keyed_by is the device's sidechain input as Live shows it, or None where Live's API does not expose it
+    (plug-ins such as Kickstart, Glue Compressor)."""
+    rows = collections.OrderedDict()
+    for t in list(song.tracks) + list(song.return_tracks) + [song.master_track]:
+        name = "Master" if t == song.master_track else t.name
+        for d in _all_devices(t.devices):
+            kind = str(getattr(d, "class_display_name", "") or d.name)
+            if "kickstart" not in (kind + " " + d.name).lower():
+                sc = next((x for x in d.parameters if x.name in SIDECHAIN_ON), None)
+                if sc is None or not sc.value:
+                    continue
+            key = None
+            rt = getattr(d, "input_routing_type", None)
+            if rt is not None:
+                ch = _route(d, "input_routing_channel")
+                key = lom.label(rt) + (" / " + ch if ch else "")
+            rows.setdefault((kind, key), []).append(name)
+    return [{"device": k, "keyed_by": key, "tracks": list(dict.fromkeys(ts))} for (k, key), ts in rows.items()]
+
+
+def audit(song, p, ctrl):
+    """What in the set trips the work up, read-only: duplicate track names, clips under a 16th, clips past the END
+    locator and missing START / END, REC / CAND / BUILD LOOP tracks and CANDIDATES scenes, solo and mute,
+    instruments loaded on tracks with no clip, and the sidechain map."""
+    return {"issues": [{"check": c, "text": text} for c, text in _issues(song, Sound(song))],
+            "sidechain": _sidechains(song)}
+
+
 # --- reading -------------------------------------------------------------------------------
 
 def overview(song, p, ctrl):
     """The whole set: sections from the locators with what sounds in each, every track in one line.
-    A track playing another's clips through its input says so (plays_via); a solo is the first thing said."""
+    A track playing another's clips through its input says so (plays_via); a solo is the first thing said,
+    then the audit's lines (see audit), when there are any."""
     concise = _concise(p)
     sound = Sound(song)
     tracks = []
@@ -239,6 +348,8 @@ def overview(song, p, ctrl):
         sections.append(dict({"name": name, "bars": lom.bars_text(song, s, e), "playing": playing},
                              **({"silenced_by_solo": silenced} if sound.soloed else {})))
     head = {"warning": sound.warning(), "soloed": sound.soloed} if sound.soloed else {}
+    found = [text for c, text in _issues(song, sound) if c != "solo"]  # the warning above says the solo
+    head.update({"audit": found} if found else {})
     return dict(head, **{
         "tempo": song.tempo,
         "signature": "%d/%d" % (song.signature_numerator, song.signature_denominator),
