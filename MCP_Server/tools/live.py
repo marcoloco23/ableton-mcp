@@ -510,6 +510,32 @@ def register(mcp: Any, get_ableton_connection: Callable[[], Any]) -> None:
         """
         return out(call("automate_status"))
 
+    @mcp.tool(annotations=_write("Meter every track over bars", destructive=False, idempotent=True))
+    def live_meters(ctx: Context, bars: str, tracks: list[str] | None = None, follow: bool = False,
+                    kick: str | None = None, response_format: Format = "concise") -> str:
+        """Levels without recording: plays the bars once and reads every track's, group's, return's and the master's
+        output meter (post-fader) inside Live 20-30 times a second, then stops and puts the playhead back. Takes as
+        long as the bars play. Per track: level (the mean), peak and an envelope per beat ("concise": per bar), in dB
+        on Live's meter scale (the fader's; not LUFS), in the mixer's hierarchy: groups and ungrouped tracks loudest
+        first, each group's tracks under it. A track with Kickstart or a sidechained compressor gets its pump: the dip
+        in dB on each kick and how long until it is back within 1 dB, against the kick group (else the kick track;
+        or `kick`). tracks narrows the answer (a group brings its tracks); every track is metered either way.
+        Refused while anything is soloed, and while the transport plays unless follow=True, which meters the bars
+        as Live plays through them and touches nothing.
+
+        Examples:
+          live_meters("49-64")                                  -> the drop: what is loudest, what pumps how much
+          live_meters("81-88", tracks=["🎸 BASS", "PAD"])
+          live_meters("97-112", follow=True)                    -> while Marc plays the set
+        """
+        from MCP_Server import meters as M
+
+        try:
+            s = M.analyse(M.run(get_ableton_connection(), bars, follow=follow, tracks=tracks), tracks, kick)
+        except M.MetersError as e:
+            raise ToolError(str(e)) from e
+        return out(M.concise(s) if response_format == "concise" else s)
+
     @mcp.tool(annotations=_write("Anything else in Live's object model", destructive=True, idempotent=False))
     def live_lom(ctx: Context, op: Literal["get", "set", "call", "batch"], path: str | None = None,
                  value: Any = None, value_path: str | None = None, args: list[Any] | None = None,

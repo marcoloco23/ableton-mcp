@@ -232,6 +232,13 @@ class Track:
         self.muted_via_solo = False        # Live sets it on every track another track's solo silences
         self.can_be_armed = True
         self.clip_slots = [Slot(), Slot()]
+        self.meter_listeners = []  # output_meter_left exists only on a track given a meter (MeterTransport)
+
+    def add_output_meter_left_listener(self, fn):
+        self.meter_listeners.append(fn)
+
+    def remove_output_meter_left_listener(self, fn):
+        self.meter_listeners.remove(fn)
 
     def create_midi_clip(self, start, length):
         self.arrangement_clips.append(Clip("", start, start + length))
@@ -415,6 +422,37 @@ class Transport(Ctrl):
         lane, beat = self.lanes[id(prm)], (bar - 1) * 4.0
         before = [b for b in sorted(lane) if b <= beat + 1e-9]
         return lane[before[-1]] if before else lane[min(lane)]
+
+
+class MeterTransport(Transport):
+    """The transport with meters that move: meters {track: f(beat) -> (left, right)}. A tick moves the playhead
+    STEP beats in SUB steps; after each step every meter is set from its function (0 while stopped) and the
+    master's meter listeners fire, as Live's meter updates come more often than its ticks."""
+
+    SUB = 8
+
+    def __init__(self, song, meters, step=0.25):
+        Transport.__init__(self, song, [])
+        self.meters, self.STEP = dict(meters), step
+        for t in list(self.meters) + list(song.return_tracks) + [song.master_track]:
+            t.output_meter_left = t.output_meter_right = 0.0
+
+    def run(self, limit=200000):
+        while self.queue and limit:
+            limit -= 1
+            self.tick_no += 1
+            song = self.song
+            for _ in range(self.SUB):
+                if song.is_playing:
+                    song.current_song_time += self.STEP / self.SUB
+                for t, f in self.meters.items():
+                    t.output_meter_left, t.output_meter_right = f(song.current_song_time) if song.is_playing else (0.0, 0.0)
+                for fn in list(song.master_track.meter_listeners):
+                    fn()
+            due = [q for q in self.queue if q[0] <= self.tick_no]
+            self.queue = [q for q in self.queue if q[0] > self.tick_no]
+            for _, fn in due:
+                fn()
 
 
 def demo_song():
