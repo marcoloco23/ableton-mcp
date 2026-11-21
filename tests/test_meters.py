@@ -212,3 +212,64 @@ def test_the_mcp_tool_answers_concise_levels(song_and_live):
     body = json.loads(r[0][0].text if isinstance(r, tuple) else r[0].text)
     pad_ = next(t for t in body["tracks"] if t["name"] == "PAD")
     assert len(pad_["envelope_per_bar"]) == 4 and "dips" not in pad_["pump"] and "envelope" not in pad_
+
+
+# 21.11.2026, Serenity bars 49-56: the 🎸 BASS group (Kickstart 2) read "pump 10.1 dB (-45.5-38.7) on 32 kicks". Its bass
+# is sparse 16ths of a quarter to half a beat, about 11 hits per 2 bars and mostly off the kick, so a dip per kick
+# measured the gaps between notes. Here: that pattern, ducked 10 dB for the first quarter beat after each kick, on a
+# meter that falls about 40 dB in a quarter beat after a note ends.
+BASS_HITS = [(1, 2), (3, 1), (6, 2), (7, 1), (10, 2), (14, 1), (17, 2), (19, 1), (22, 2), (26, 1), (29, 2)]  # (16th, 16ths)
+
+
+def sparse_bass(beat):
+    pos = beat % 8
+    since = None  # beats since the last note ended (0 inside a note)
+    for step, length in BASS_HITS:
+        on, off = step / 4, (step + length) / 4
+        if on <= pos < off:
+            since = 0.0
+        elif pos >= off and (since is None or pos - off < since):
+            since = pos - off
+    if since is None:
+        return 0.0, 0.0
+    duck = 10 ** (-10 / 20.0) if beat % 1 < 0.25 else 1.0
+    v = 0.45 * duck * 10 ** (-160 * since / 20.0)  # the meter's release: 160 dB a beat
+    return (v, v) if v > 1e-4 else (0.0, 0.0)
+
+
+def gappy_pad(beat):  # the pad's 6 dB duck, but it rests through every eighth beat
+    return (0.0, 0.0) if beat % 8 >= 7 else pad(beat)
+
+
+@pytest.fixture
+def sparse_set():
+    kicks = Track("👊 KICK", audio=True)
+    kicks.is_foldable = True
+    bass = Track("🎸 BASS", [Device("Kickstart 2")], audio=True)
+    bass.is_foldable = True
+    sub = Track("SUB", audio=True)
+    sub.is_grouped, sub.group_track = True, bass
+    p = Track("PAD", [Device("Kickstart 2")], audio=True)
+    song = Song([kicks, bass, sub, p], [])
+    live_ = MeterTransport(song, {kicks: kick, bass: sparse_bass, sub: sparse_bass, p: gappy_pad})
+    yield song, live_
+    live._METERS.clear()
+    live._clock = __import__("time").time
+
+
+def test_a_sparse_part_is_not_measurable_instead_of_a_pump_from_its_gaps(sparse_set):
+    s, _ = measure(*sparse_set, bars="3-10")
+    p = {r["name"]: r for r in s["tracks"]}["🎸 BASS"]["pump"]
+    assert p["kicks"] == 32 and p["measured"] * 2 < p["kicks"] and p["dip_db"] is None and p["dip_iqr_db"] is None
+    line = next(line for line in M.render(s).splitlines() if line.startswith("🎸 BASS"))
+    assert f"pump not measurable: it sounds across {p['measured']} of 32 kicks, mostly gaps between notes" in line
+
+
+def test_pump_is_the_median_over_the_kicks_a_track_sounds_across_and_its_spread_the_iqr(sparse_set):
+    s, _ = measure(*sparse_set, bars="3-10")
+    p = {r["name"]: r for r in s["tracks"]}["PAD"]["pump"]
+    assert p["kicks"] == 32 and p["measured"] == 24  # the kicks into and after each rest are left out
+    assert abs(p["dip_db"] - 6.0) < 0.3 and p["dip_iqr_db"][1] - p["dip_iqr_db"][0] < 0.5
+    assert all(d["dip_db"] > 0 for d in p["dips"])
+    line = next(line for line in M.render(s).splitlines() if line.startswith("PAD"))
+    assert "pump 6.0 dB on 24 of 32 kicks, back within 1 dB after" in line and "(16 of" not in line
