@@ -35,7 +35,7 @@ def call(m, name, **args):
 
 def test_the_server_offers_only_annotated_live_tools_taught_by_example():
     tools = asyncio.run(server.list_tools())
-    assert len(tools) == 20
+    assert len(tools) == 21
     for t in tools:
         assert t.name.startswith("live_"), t.name
         a = t.annotations

@@ -1227,6 +1227,10 @@ def _get_registry():
             "handler": live.warp,
             "modifying": True,
         },
+        "live_meters": {
+            "handler": live.meters,
+            "modifying": True,
+        },
         "simpler_region": {
             "handler": lambda song, p, ctrl: _simpler_region(song, p, ctrl),
             "modifying": True,

@@ -1345,3 +1345,193 @@ def load(song, p, ctrl):
         song.view.select_device(devices[-1])
     ctrl.application().browser.load_item(it)
     return {"track": t.name, "loaded": str(it.name), "devices": [d.name for d in t.devices]}
+
+
+# --- meters: levels while the set plays, sampled inside Live -------------------------------------
+#
+# A socket round trip per reading can't keep up with 40 tracks, so the samples are taken here, on Live's
+# own clock: on every tick (schedule_message, about 10 a second) and whenever the master's meter updates
+# (its listener), at most _METER_HZ times a second of song time. The client starts the job, asks for the
+# status, and gets every sample once the span has played. MCP_Server/meters.py turns them into levels.
+
+_METERS = {"state": "idle"}
+_METER_HZ = 30.0
+_MARGIN_S = 10.0  # the job ends itself this long after the span should have played
+_LEAD_BEATS = 1.0  # sampled before the bars too, so a kick on the first beat is seen rising
+_clock = time.time
+
+
+def _meter_rows(song):
+    """Every track, group, return and the master that has an output meter: (object, row)."""
+    out = []
+    every = ([(t, "group" if _kind(t) == "group" else "track") for t in song.tracks]
+             + [(t, "return") for t in song.return_tracks] + [(song.master_track, "master")])
+    for t, kind in every:
+        try:
+            float(t.output_meter_left), float(t.output_meter_right)
+        except Exception:  # a MIDI track with no instrument has no audio out, and no meter
+            continue
+        row = {"name": "Master" if kind == "master" else t.name, "kind": kind}
+        if getattr(t, "is_grouped", False):
+            row["group"] = t.group_track.name
+        pump = [d.name for d in t.devices if d.name.lower().startswith("kickstart") or _sidechained(d)]
+        if pump:
+            row["pump"] = pump
+        out.append((t, row))
+    return out
+
+
+def _sidechained(device):
+    """A compressor (Compressor, Glue Compressor) with its sidechain switched on."""
+    for prm in device.parameters:
+        if prm.name == "S/C On":
+            return prm.value >= 0.5
+    return False
+
+
+def _meter_scale(song):
+    """Live's meter is drawn on the fader's scale: the shown dB of raw 0, 0.01, ..., 1.0 on the master's
+    fader (None for -inf). The client reads a meter value through this table."""
+    vol = song.master_track.mixer_device.volume
+    out = []
+    for k in range(101):
+        n = params.display_number(str(vol.str_for_value(vol.min + (vol.max - vol.min) * k / 100.0)))
+        out.append(None if n is None or n <= -1e9 else n)
+    return out
+
+
+def meters(song, p, ctrl):
+    """action start | status | stop.
+
+    start {bars: "49-64", follow: false, tracks: [names]}: plays the bars once (one bar of pre-roll) and samples
+    every meter while the playhead is inside them (and the beat before); returns at once. Refused while anything is soloed, while the
+    transport plays (unless follow, which samples as Live plays through the bars and touches nothing), and while
+    a meters or automate job runs. tracks are only checked to exist, before anything plays. Afterwards the
+    transport is stopped and the playhead and loop switch are put back (with follow, nothing was touched).
+    status: the state, and when the job has ended (done, stopped, error) every sample.
+    stop: ends a running job now, puts everything back, and returns what it has.
+    """
+    action = p.get("action", "status")
+    if action == "status":
+        return _meters_view()
+    if action == "stop":
+        if _METERS.get("state") == "running":
+            _METERS["finish"]("stopped on request")
+        return _meters_view()
+    if action != "start":
+        raise ValueError("action is start, status or stop, not '%s'" % action)
+    if _METERS.get("state") == "running":
+        raise RuntimeError("meters is already running (bars %s); live_meters(action='stop') ends it" % _METERS["bars"])
+    from . import dispatch
+    if dispatch._AUTOMATE.get("state") == "running":
+        raise RuntimeError("automate is recording; meters waits until it is done")
+    a, b = lom.parse_bars(song, p["bars"])
+    for name in p.get("tracks") or []:
+        lom.track(song, name)
+    soloed = [t.name for t in list(song.tracks) + list(song.return_tracks) if _on(t, "solo")]
+    if soloed:
+        raise RuntimeError("SOLO IS ON: %s soloed, so the other meters read silence. Unsolo first."
+                           % ", ".join("'%s'" % n for n in soloed))
+    follow = bool(p.get("follow"))
+    now = song.current_song_time
+    if song.is_playing and not follow:
+        raise RuntimeError("The transport is playing (bar %g). meters plays the bars itself and would take the "
+                           "playhead away; stop playback first, or pass follow to meter as Live plays."
+                           % lom.bar_of(song, now))
+    if follow and now >= b:
+        raise RuntimeError("The playhead is at bar %g, past bars %s; follow meters as Live plays through them."
+                           % (lom.bar_of(song, now), lom.bars_text(song, a, b)))
+    rows = _meter_rows(song)
+    beats_s = 60.0 / song.tempo
+    start = max(0.0, a - lom.beats_per_bar(song))
+    span_s = ((b - min(now, a)) if follow else (b - start)) * beats_s
+    saved = {"playing": song.is_playing, "time": now, "loop": song.loop}
+    job = {"beats": [], "l": [[] for _ in rows], "r": [[] for _ in rows], "phase": "seek", "settle": 0}
+    master = song.master_track
+
+    def sample():
+        t = song.current_song_time
+        if not a - _LEAD_BEATS <= t < b or (job["beats"] and t - job["beats"][-1] < 1.0 / _METER_HZ / beats_s):
+            return
+        job["beats"].append(round(t, 4))
+        for k, (trk, _) in enumerate(rows):
+            job["l"][k].append(round(trk.output_meter_left, 3))
+            job["r"][k].append(round(trk.output_meter_right, 3))
+
+    def on_meter():
+        if _METERS.get("state") == "running" and job["phase"] == "sample":
+            sample()
+
+    def finish(why=None, error=None):
+        if _METERS.get("state") != "running":
+            return
+        _METERS["state"] = "error" if error else ("stopped" if why else "done")
+        problems = []
+        steps = [lambda: master.remove_output_meter_left_listener(on_meter)] if job.get("listening") else []
+        if not follow:
+            steps += [song.stop_playing, lambda: setattr(song, "current_song_time", saved["time"]),
+                      lambda: setattr(song, "loop", saved["loop"])]
+        for step in steps:  # each one on its own: one failing must not keep the others from running
+            try:
+                step()
+            except Exception as e:
+                problems.append(str(e))
+        _METERS.update({"why": why, "error": error, "cleanup_errors": problems})
+
+    def tick():
+        if _METERS.get("state") != "running":
+            return
+        try:
+            t = song.current_song_time
+            if _clock() > job["deadline"]:
+                return finish(error="no end of bars %s within %.0f s; transport put back"
+                              % (_METERS["bars"], span_s + _MARGIN_S))
+            if job["phase"] == "seek":
+                if not follow:
+                    song.start_playing()
+                    song.current_song_time = start
+                job["phase"] = "settle"
+            elif job["phase"] == "settle":  # Live moves the playhead on its next tick
+                job["phase"] = "sample"
+            else:
+                if not song.is_playing:
+                    return finish("the transport stopped at bar %g" % lom.bar_of(song, t))
+                sample()
+                if t >= b or (job["beats"] and t < job["beats"][-1] - 1.0):  # past the end, or looped back
+                    return finish()
+            ctrl.schedule_message(1, tick)
+        except Exception as e:
+            finish(error=str(e))
+
+    _METERS.clear()
+    _METERS.update({"state": "running", "bars": lom.bars_text(song, a, b), "from_beat": a, "to_beat": b,
+                    "tempo": song.tempo, "beats_per_bar": lom.beats_per_bar(song), "follow": follow, "rows": [r for _, r in rows], "job": job,
+                    "finish": finish, "scale": _meter_scale(song), "timeout_s": round(span_s + _MARGIN_S, 1),
+                    "warning": ("Back to Arrangement is lit: some tracks play Session clips, not the arrangement"
+                                if getattr(song, "back_to_arranger", False) else None)})
+    job["deadline"] = _clock() + span_s + _MARGIN_S
+    if hasattr(master, "add_output_meter_left_listener"):
+        master.add_output_meter_left_listener(on_meter)
+        job["listening"] = True
+    ctrl.schedule_message(1, tick)
+    return _meters_view()
+
+
+def _meters_view():
+    """The job as JSON: progress while it runs; every sample once it has ended."""
+    m = _METERS
+    if m.get("state", "idle") == "idle":
+        return {"state": "idle"}
+    job = m["job"]
+    out = {"state": m["state"], "bars": m["bars"], "tempo": m["tempo"], "beats_per_bar": m["beats_per_bar"],
+           "follow": m["follow"],
+           "samples": len(job["beats"]), "timeout_s": m["timeout_s"]}
+    for key in ("warning", "why", "error", "cleanup_errors"):
+        if m.get(key):
+            out[key] = m[key]
+    if m["state"] != "running":
+        out.update({"from_beat": m["from_beat"], "to_beat": m["to_beat"], "scale": m["scale"],
+                    "beats": list(job["beats"]), "tracks": [  # a track silent throughout sends no samples
+                        dict(row, l=list(job["l"][k]), r=list(job["r"][k])) if any(job["l"][k]) or any(job["r"][k])
+                        else dict(row, silent=True) for k, row in enumerate(m["rows"])]})
+    return out
