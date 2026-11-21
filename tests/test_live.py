@@ -379,7 +379,7 @@ def test_audit_names_what_trips_the_work_up(song):
                         "'HOOK#1', 'HOOK#2', 'HOOK#3'")
     assert lom.track(song, "HOOK#2") is song.tracks[7]  # the form the line gives addresses the track
     assert a["short clips"] == "clips under a 16th, all but silent: REV CRASH at 145 (0 beats)"
-    assert a["past END"] == "clips run past the END locator (bar 205): SERUM BASS to 209"
+    assert a["past END"] == "clips run past the END locator (bar 205): SERUM BASS to 208"  # 816-832: bars 205-208
     assert "locators" not in a
     assert a["leftovers"] == ("tracks REC KICK, KICK CAND; scenes CANDIDATES 1, CANDIDATES 2: left by a recording or a "
                               "candidates round")
