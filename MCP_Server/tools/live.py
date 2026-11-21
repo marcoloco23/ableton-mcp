@@ -27,7 +27,8 @@ INSTRUCTIONS = """Ableton Live, the set that is open right now. Conventions ever
   A bare number is Live's raw value; prefer the shown text.
 - Session view: name the scene, or give its number (1 is the top scene). With scene=, the notes tools read and write
   that slot's clip, its bars counted from the clip's start; live_scenes lists them, live_clips("to_arrangement") copies them.
-- Start with live_overview to know the set, live_track to see one track's devices and settings. Use live_lom only for what no other tool covers.
+- Start with live_overview to know the set (its "audit" lines say what will trip the work up; live_audit adds the sidechain map),
+  live_track to see one track's devices and settings. Use live_lom only for what no other tool covers.
 """
 
 Format = Literal["concise", "detailed"]
@@ -75,7 +76,7 @@ def _grid_text(rows: list[list[Any]], first_bar: float) -> str:
 
 
 # Jobs Live may work on for up to a minute (the Remote Script's dispatch.timeout); the rest answer in 10 s.
-LONG = ("lom_batch", "live_overview", "live_track", "live_notes_read", "live_notes_write", "live_clips", "live_load")
+LONG = ("lom_batch", "live_overview", "live_audit", "live_track", "live_notes_read", "live_notes_write", "live_clips", "live_load")
 
 
 def register(mcp: Any, get_ableton_connection: Callable[[], Any]) -> None:
@@ -119,7 +120,8 @@ def register(mcp: Any, get_ableton_connection: Callable[[], Any]) -> None:
         over its span; "detailed" gives each track's "sounds" in bars. Muted tracks and tracks in a muted group
         are not heard. When anything is soloed, "warning"
         and "soloed" come first, the tracks Live silences via solo carry the flag "silenced by solo", and
-        each section lists them under silenced_by_solo, not playing.
+        each section lists them under silenced_by_solo, not playing. "audit" then lists, one line each, what
+        live_audit flags (duplicate names, clips under a 16th or past END, leftovers, mutes, unused seats).
 
         response_format "concise" gives clip bars as merged spans ("17-48, 65-208"); "detailed" lists each
         clip by name and bars, plus pan and sends per track.
@@ -129,6 +131,24 @@ def register(mcp: Any, get_ableton_connection: Callable[[], Any]) -> None:
           live_overview(response_format="detailed")    -> every clip's name and bars
         """
         return out(call("live_overview", response_format=response_format))
+
+    @mcp.tool(annotations=_read("Audit the set before work"))
+    def live_audit(ctx: Context) -> str:
+        """What in the open set will trip the work up, in one read-only pass; run it before any work.
+        issues, one line each: tracks sharing a name (live_track and the recorder refuse it; the line gives
+        their positions and the 'HOOK#2' form that addresses each), arrangement clips under a 16th (all but
+        silent), clips past the END locator and a missing START or END locator, leftover REC / CAND /
+        BUILD LOOP tracks and CANDIDATES scenes, a solo and what it silences, muted tracks, and tracks with
+        an instrument loaded (Simpler, Sampler, a rack, a plug-in instrument) but no clip in the arrangement:
+        a seat to use before adding a track. sidechain: every Kickstart and every device with its sidechain
+        on (S/C On), grouped by what keys it; keyed_by is null where Live's API hides the input (plug-ins,
+        Glue Compressor). live_overview carries the same issue lines as "audit".
+
+        Examples:
+          live_audit()   -> {"issues": [{"check": "duplicate names", "text": "3 tracks named 'HOOK' (tracks 37, 38, 39): ..."}],
+                             "sidechain": [{"device": "Compressor", "keyed_by": "👊 KICK / Post FX", "tracks": ["PAD"]}]}
+        """
+        return out(call("live_audit"))
 
     @mcp.tool(annotations=_read("Read one track or device"))
     def live_track(ctx: Context, track: str, response_format: Format = "concise") -> str:
@@ -438,7 +458,7 @@ def register(mcp: Any, get_ableton_connection: Callable[[], Any]) -> None:
         """Record automation into the arrangement: each lane is a target (a parameter, "Track / pan" or
         "Track / send A"), points [[bar, value], …] with values as Live shows them, and a shape: linear
         (default), ease, or ease-log (for frequencies); a fade from or to "-inf dB" eases the knob's
-        position. A mixer volume is refused: fades and rides go on a Utility's Gain, so the fader stays
+        position. A mixer volume is refused: fades and rides go on a Utility's Output (its gain), so the fader stays
         free. Live plays only the bars that move, with Arrangement Record and Automation Arm on, moving
         the knobs the way Push writes automation; Cmd+Z undoes it. Returns at once: poll
         live_automate_status until state is done.
@@ -450,7 +470,7 @@ def register(mcp: Any, get_ableton_connection: Callable[[], Any]) -> None:
         Examples:
           live_automate([{"target": "PAD / Auto Filter / Frequency", "points": [[89, "900 Hz"], [97, "20 kHz"]],
                           "shape": "ease-log"}])
-          live_automate([{"target": "TOPS / Utility / Gain", "points": [[96, "0 dB"], [97, "-inf dB"]]}])
+          live_automate([{"target": "TOPS / Utility / Output", "points": [[96, "0 dB"], [97, "-inf dB"]]}])
           live_automate([{"target": "PAD / volume", "clear": "41-57", "value": "-4 dB"}])   -> a flat line
 
         saved=True writes the same lanes in seconds and to the beat into a copy of the saved set,
@@ -461,7 +481,7 @@ def register(mcp: Any, get_ableton_connection: Callable[[], Any]) -> None:
         first. open_set=False writes the copy without opening it. A lane may also be {"target": ..., "clear": "all"},
         which removes it. Devices inside racks, switches and menus stay with the recording.
 
-          live_automate([{"target": "PAD / Utility / Gain", "points": [[41, "-inf dB"], [57, "-4 dB"]]}], saved=True)
+          live_automate([{"target": "PAD / Utility / Output", "points": [[41, "-inf dB"], [57, "-4 dB"]]}], saved=True)
         """
         if saved:
             return saved_set(lambda S, conn: S.patch(conn, lanes, open_it=open_set))

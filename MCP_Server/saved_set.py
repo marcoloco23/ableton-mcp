@@ -13,7 +13,7 @@ Units. The XML keeps a control in its own unit (Hz, linear gain, seconds, a frac
 API in a raw value, the screen in a third form. A control's XML unit is found, never assumed: Live's shown value
 at both ends of the control's range (str_for_value, a read) must land on the XML's MidiControllerRange, and its
 current value on the XML's when nothing automates it. The same match pairs each of Live's parameters with its XML
-element, in order, so "PAD / Utility / Gain" finds StereoGain.Gain without a table of names.
+element, in order, so "PAD / Utility / Output" finds StereoGain.Gain without a table of names.
 
 Freshness. Live writes its undo history to disk (Preferences/Ableton/Live x/Undo/*.band) with every undo step and
 a few ms after every save. A journal newer than the set file means Live holds changes the file lacks, and Live
@@ -453,7 +453,7 @@ class SetView:
         raise Refused(f"{what!r} is not volume, pan or a send")
 
     def control(self, target: str) -> Control:
-        """A target as the live_* tools name it ("PAD / Utility / Gain", "PAD / send A", "Master / Utility / Gain")."""
+        """A target as the live_* tools name it ("PAD / Utility / Output", "PAD / send A", "Master / Utility / Output")."""
         parts = [p.strip() for p in target.split("/")]
         name, track_path, track_el = self.track(parts[0])
         if len(parts) == 2:
@@ -714,7 +714,7 @@ def patch(conn, lanes: list[dict], open_it: bool = True, prefs: Path | None = No
           opener=None) -> dict:
     """Write lanes into a copy of the set open in Live, "<set> [auto <date time>].als" beside it, and open that copy
     in Live (open_it=False only writes it). Lanes as live_automate takes them: {"target", "points": [[bar, value]],
-    "shape"?} or {"target", "clear": "all"}. A mixer volume is refused (fades go on a Utility's Gain)."""
+    "shape"?} or {"target", "clear": "all"}. A mixer volume is refused (fades go on a Utility's Output, its gain)."""
     live = Live(conn)
     path = Path(live.get("file_path")[0] or "")
     if not path.name.endswith(".als") or not path.exists():
@@ -732,8 +732,8 @@ def patch(conn, lanes: list[dict], open_it: bool = True, prefs: Path | None = No
             raise Refused(f"{c.target}: switch and menu lanes are not written into the saved set (their event "
                           "type there is unproven); use live_automate")
         if c.path.endswith("mixer_device.volume") and not lane.get("clear"):
-            raise Refused(f"{c.target}: fades go on a Utility's Gain (Marc's rule): add a Utility and automate "
-                          f"'{c.target.rsplit(' / ', 1)[0]} / Utility / Gain'")
+            raise Refused(f"{c.target}: fades go on a Utility's Output, its gain (Marc's rule): add a Utility and "
+                          f"automate '{c.target.rsplit(' / ', 1)[0]} / Utility / Output'")
         if lane.get("clear"):
             if str(lane["clear"]).strip().lower() == "all":
                 how = write_lane(view, c, [], clear_all=True)

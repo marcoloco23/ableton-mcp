@@ -35,7 +35,7 @@ def call(m, name, **args):
 
 def test_the_server_offers_only_annotated_live_tools_taught_by_example():
     tools = asyncio.run(server.list_tools())
-    assert len(tools) == 19
+    assert len(tools) == 20
     for t in tools:
         assert t.name.startswith("live_"), t.name
         a = t.annotations
@@ -45,7 +45,7 @@ def test_the_server_offers_only_annotated_live_tools_taught_by_example():
     assert "1-based and song-absolute" in server.instructions
 
 
-@pytest.mark.parametrize("name, read_only", [("live_overview", True), ("live_track", True), ("live_notes_read", True),
+@pytest.mark.parametrize("name, read_only", [("live_overview", True), ("live_audit", True), ("live_track", True), ("live_notes_read", True),
                                              ("live_automation", True), ("live_set", False), ("live_notes_write", False),
                                              ("live_lom", False)])
 def test_read_tools_say_so(name, read_only):

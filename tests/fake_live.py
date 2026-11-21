@@ -57,8 +57,10 @@ def hz(v):  # 20 Hz .. 20 kHz, exponential like Live's filters
 
 
 class Device:
-    def __init__(self, name, parameters=(), chains=None, class_name="Fake"):
-        self.name, self.class_name = name, class_name
+    """type is Live's DeviceType: 1 instrument, 2 audio effect, 4 MIDI effect."""
+
+    def __init__(self, name, parameters=(), chains=None, class_name="Fake", type=2):
+        self.name, self.class_name, self.class_display_name, self.type = name, class_name, name, type
         self.parameters = [Param("Device On", items=["Off", "On"], value=1.0)] + list(parameters)
         self.can_have_chains = chains is not None
         self.chains = list(chains or [])
@@ -69,9 +71,14 @@ class Chain:
         self.name, self.devices = name, list(devices)
 
 
+EQ_TYPES = ["High Pass 48dB", "High Pass 12dB", "Low Shelf", "Bell", "Notch", "High Shelf", "Low Pass 12dB", "Low Pass 48dB"]
+
+
 def eq_eight():
-    return Device("EQ Eight", [Param("1 Filter Type A", items=["Low Cut 48dB", "Low Cut 12dB", "Bell", "High Pass 48dB"]),
-                               Param("1 Frequency A", hz), Param("1 Gain A", lambda v: "%.1f dB" % (v * 30 - 15))],
+    """EQ Eight as Live 12.4 names it (read 21.11.2026): band types "High Pass 48dB" … "Low Pass 48dB", Q is "1 Q A"."""
+    return Device("EQ Eight", [Param("1 Filter Type A", items=EQ_TYPES), Param("1 Frequency A", hz),
+                               Param("1 Gain A", lambda v: "%.1f dB" % (v * 30 - 15)),
+                               Param("1 Q A", lambda v: "%.2f" % (0.1 + v * 17.9))],
                   class_name="Eq8")
 
 
@@ -412,9 +419,9 @@ class Transport(Ctrl):
 
 def demo_song():
     """BASS MID (EQ Eight), SERUM BASS (MIDI clip at bars 49-52), a rack, PAD / STAB, two Drums, returns."""
-    bass = Track("SERUM BASS", [Device("Serum 2"), Device("Saturator", [Param("Drive", lambda v: "%.1f dB" % (v * 36))])],
+    bass = Track("SERUM BASS", [Device("Serum 2", type=1), Device("Saturator", [Param("Drive", lambda v: "%.1f dB" % (v * 36))])],
                  [Clip("Bass A", 192.0, 208.0, [Note(38, 0.0, 0.45, 110), Note(38, 0.75, 0.2, 92), Note(33, 5.5, 0.4, 100)])])
-    rack = Device("Drum Rack", [Param("Macro 1")], chains=[Chain("Kick", [Device("Simpler", [Param("Decay")])])])
+    rack = Device("Drum Rack", [Param("Macro 1")], chains=[Chain("Kick", [Device("Simpler", [Param("Decay")], type=1)])], type=1)
     tracks = [Track("BASS MID", [eq_eight()]), bass, Track("DRUMS", [rack]), Track("PAD / STAB"),
               Track("Drums", audio=True), Track("Drums", audio=True)]
     returns = [Track("A-Reverb", sends=()), Track("B-Delay", sends=())]
