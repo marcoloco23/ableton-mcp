@@ -463,6 +463,11 @@ def register(mcp: Any, get_ableton_connection: Callable[[], Any]) -> None:
         the knobs the way Push writes automation; Cmd+Z undoes it. Returns at once: poll
         live_automate_status until state is done.
 
+        Refused while a track plays Session or Back to Arrangement is lit (Arrangement Record would write those
+        tracks over their clips), or while Arrangement Record, MIDI Arrangement Overdub or Session Overdub is on.
+        A pass that changed any arrangement clip anyway is undone until the clips match again and ends in state
+        "error", naming the tracks in "touched", with "repaired" saying whether the undo got there.
+
         Live's API cannot delete arrangement automation. A lane with clear ("41-57", or "all" for the whole
         song) instead of points records a flat line over those bars, at value or at what the parameter
         holds now; it is allowed on a mixer volume, to undo an old fade there.
