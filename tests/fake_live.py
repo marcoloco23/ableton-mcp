@@ -2,6 +2,7 @@
 notes to run the Remote Script's handlers without Live."""
 import math
 import os
+import random
 import sys
 import types
 
@@ -397,7 +398,8 @@ class Transport(Ctrl):
     """Live's transport and arrangement automation recording, one tick at a time (a model, not a
     measurement). A scheduled step runs on a later tick; playing moves the playhead STEP beats a tick.
     With Arrangement Record and Automation Arm on, a parameter inside a gesture is written at the
-    playhead when its value has changed since the last write (Live records only a value that changes),
+    playhead the tick read when its value has changed since the last write (Live records only a value that changes;
+    in Serenity a jump was recorded at most 0.143 beats after its bar, under the 0.21 of a tick, 23.11.2026),
     replacing the points of its lane since that write; a lane holds its first point's value before it.
     lanes: {param: {beat: raw value}}."""
 
@@ -416,7 +418,11 @@ class Transport(Ctrl):
             self.tick_no += 1
             song = self.song
             if song.is_playing:
-                song.current_song_time += self.STEP
+                song.current_song_time += self.advance()
+            due = [q for q in self.queue if q[0] <= self.tick_no]
+            self.queue = [q for q in self.queue if q[0] > self.tick_no]
+            for _, fn in due:
+                fn()
             if song.is_playing and song.record_mode and song.session_automation_record:
                 now = song.current_song_time
                 for prm in self.params:
@@ -429,16 +435,34 @@ class Transport(Ctrl):
                             del lane[b]
                         lane[now] = prm.value
                         self.last[key] = (now, prm.value)
-            due = [q for q in self.queue if q[0] <= self.tick_no]
-            self.queue = [q for q in self.queue if q[0] > self.tick_no]
-            for _, fn in due:
-                fn()
+
+    def advance(self):
+        return self.STEP
 
     def at(self, prm, bar):
         """The lane's value at a bar, as Live plays it back: the last point at or before it."""
         lane, beat = self.lanes[id(prm)], (bar - 1) * 4.0
         before = [b for b in sorted(lane) if b <= beat + 1e-9]
         return lane[before[-1]] if before else lane[min(lane)]
+
+
+class TickingTransport(Transport):
+    """Live's ticks as recorded into Serenity (23.11.2026): 9 or 10 audio buffers of 512 samples at 48 kHz (96 or
+    107 ms, 0.2112 or 0.2347 beats at 132 BPM), at any phase to the bars: after a start or a seek, the first tick
+    comes a random part of a tick later."""
+
+    BUFFER_S = 512 / 48000.0
+
+    def __init__(self, song, params, seed):
+        Transport.__init__(self, song, params)
+        self.rng, self.expected = random.Random(seed), None
+
+    def advance(self):
+        beats = self.rng.choice((9, 10)) * self.BUFFER_S * self.song.tempo / 60.0
+        if self.song.current_song_time != self.expected:
+            beats *= self.rng.random()
+        self.expected = self.song.current_song_time + beats
+        return beats
 
 
 class MeterTransport(Transport):

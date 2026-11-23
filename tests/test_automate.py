@@ -3,8 +3,8 @@ import re
 
 import pytest
 
-from fake_live import Clip, Device, Param, Transport, db, demo_song, lom
-from handlers import dispatch
+from fake_live import Clip, Device, Param, TickingTransport, Transport, db, demo_song, hz, lom
+from handlers import dispatch, params
 
 
 @pytest.fixture
@@ -129,7 +129,7 @@ def test_a_recorded_fade_to_minus_inf_ends_exactly_on_it():
         live.STEP = 1 / 32.0  # Live's ticks fall anywhere, also in the eighth of a beat after the last point
         automate(song, live, [{"target": "PAD / STAB / Utility / Output", "points": [[start, "-4 dB"], [185, "-inf dB"]],
                                "shape": "ease"}])
-        after = [v for b, v in live.lanes[id(g)].items() if b > (185 - 1) * 4.0]
+        after = [v for b, v in live.lanes[id(g)].items() if b >= (185 - 1) * 4.0]
         assert after and set(after) == {-1.0}  # never a hair above -inf once the fade is down
         dispatch._AUTOMATE.clear()
 
@@ -271,3 +271,27 @@ def test_a_recorder_is_told_what_stops_it_and_gets_the_clips_to_compare(song):
     assert "'BASS MID' plays Session" in dispatch.execute("record_check", {}, song, None)["refused"]
     song.tracks[0].playing_slot_index, song.record_mode = -1, True
     assert dispatch.execute("record_check", {}, song, None)["refused"] == "Not recording: Arrangement Record is already on."
+
+
+STEPS = (48.0, 65.0, 177.0)  # the kick group's high-pass in Serenity: written on the first tick after, 0.04 bars late
+
+
+@pytest.mark.parametrize("seed", range(25))
+def test_a_step_lands_on_the_last_tick_before_its_time_never_after(seed):
+    """23.11.2026: steps asked for at 48, 65 and 177 landed at 48.04, 65.04 and 177.04, so the high-pass opened inside
+    the downbeat kick. On ticks at 10 a second and any phase, each now lands at most one tick early, never late."""
+    song = demo_song()
+    song.tempo = 132.0
+    f = Param("Frequency", hz, value=0.0)
+    song.tracks[3].devices.append(Device("Auto Filter", [f]))
+    pts = []
+    for s in STEPS:  # shut at s, open again half a bar on, as fillers' dropouts do
+        pts += [[s - 0.01, "20 Hz"], [s, "150 Hz"], [s + 0.49, "150 Hz"], [s + 0.5, "20 Hz"]]
+    live = TickingTransport(song, [f], seed)
+    automate(song, live, [{"target": "PAD / STAB / Auto Filter / Frequency", "points": pts, "shape": "linear"}])
+    lane, tick = sorted(live.lanes[id(f)].items()), 10 * TickingTransport.BUFFER_S * 132.0 / 60.0
+    shut, open_ = params.resolve_value(f, "150 Hz"), params.resolve_value(f, "20 Hz")
+    for s in STEPS:
+        for at, value in (((s - 1) * 4.0, shut), ((s + 0.5 - 1) * 4.0, open_)):
+            landed = next(b for b, v in lane if b > at - 1.0 and abs(v - value) < 1e-4)
+            assert at - tick <= landed <= at, (seed, s, at, landed)

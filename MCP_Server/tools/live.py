@@ -463,6 +463,10 @@ def register(mcp: Any, get_ableton_connection: Callable[[], Any]) -> None:
         the knobs the way Push writes automation; Cmd+Z undoes it. Returns at once: poll
         live_automate_status until state is done.
 
+        A knob moves only on Live's ticks, about 10 a second: a jump (two points closer than a tick) lands on the
+        last tick before its time, up to one tick (about 0.1 s) early, never late. For steps exact to the beat, use
+        saved=True; to see where a pass's steps landed, save the set and call live_automation(plan=lanes).
+
         Refused while a track plays Session or Back to Arrangement is lit (Arrangement Record would write those
         tracks over their clips), or while Arrangement Record, MIDI Arrangement Overdub or Session Overdub is on.
         A pass that changed any arrangement clip anyway is undone until the clips match again and ends in state
@@ -493,23 +497,31 @@ def register(mcp: Any, get_ableton_connection: Callable[[], Any]) -> None:
         return out(call("automate", lanes=lanes))
 
     @mcp.tool(annotations=_read("Read arrangement automation"))
-    def live_automation(ctx: Context, target: str | None = None) -> str:
+    def live_automation(ctx: Context, target: str | None = None, plan: list[Lane] | None = None) -> str:
         """Every arrangement automation lane, read from the saved set without playing: target, the value before
         the song, and its breakpoints as [bar, shown value]. target narrows it to a track ("PAD"), a device
         ("PAD / Utility") or one lane ("PAD / send A"). A lane recorded in real time is thinned to the points
         that shape it (within 0.5 dB, a quarter tone, or 0.5 % of the range). It reads the last save: "state"
         says "unsaved" when Live has changed the set since.
 
+        plan= (the lanes given to live_automate) checks their steps instead (two points under a 16th apart): "off"
+        names lane and bar of every step the saved lanes put more than 1/64 bar late, more than 0.25 s early, or
+        nowhere.
+
         Examples:
           live_automation("PAD")         -> PAD / Utility / Output, PAD / send A, … with [[41, "-inf dB"], [57, "-4.0 dB"]]
           live_automation("VOX LEAD / send E")
+          live_automation(plan=[{"target": "KICK / Auto Filter / Frequency", "points": [[47.99, "20 Hz"], [48, "150 Hz"]]}])
+            -> {"off": ["KICK / Auto Filter / Frequency: the step at bar 48 lands 0.045 bars late, at 48.040"]}
         """
+        if plan:
+            return saved_set(lambda S, conn: S.steps(conn, plan))
         return saved_set(lambda S, conn: S.lanes(conn, target))
 
     @mcp.tool(annotations=_read("Automation recording progress"))
     def live_automate_status(ctx: Context) -> str:
         """How live_automate is doing: state running | done | error, the spans (bars) it records and which one
-        is recording now.
+        is recording now, and tick_beats: Live's tick as the pass measured it, the most a step lands early.
 
         Example: live_automate_status()  -> {"state": "done", ...}
         """

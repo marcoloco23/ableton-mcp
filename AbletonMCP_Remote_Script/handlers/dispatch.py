@@ -1368,6 +1368,12 @@ def execute(command_type, params, song, ctrl):
 
 _AUTOMATE = {"state": "idle"}
 _TICK_BEATS = 0.125  # curve resolution of the precomputed values
+# A value moves only on a tick: about 10 a second, each 9 or 10 audio buffers (0.2112 or 0.2347 beats at 132 BPM,
+# 96 or 107 ms, between the points of every lane recorded into Serenity, 23.11.2026), and Live records it at the
+# playhead the tick reads. A jump written on the first tick after its bar landed up to a tick late (48.04, 64.05,
+# 65.04, 177.04: the kick group's high-pass opened inside the downbeat kick). So a jump is written on the last tick
+# before it, the next tick predicted from the longest of the last few; until the pass has measured them, this:
+_TICK_S = 0.11
 
 # Arrangement Record writes every track that does not follow the arrangement into it: a track playing or
 # launching a Session clip, or one stopped in Session (Back to Arrangement lit), and that cuts its clips
@@ -1485,8 +1491,17 @@ def _automate_lanes(song, plan):
         else:
             points = lane["points"]
         curve = _automate_curve(param, points, lane.get("shape"))
-        lanes.append({"name": name, "param": param, "curve": curve})
+        times = sorted((float(b) - 1) * 4.0 for b, _ in points)
+        lanes.append({"name": name, "param": param, "curve": curve, "times": times})
     return lanes
+
+
+def _written_for(times, now, lead):
+    """The plan time a tick at now writes the value of: now, or the end of a jump (two plan points closer than a
+    tick, which no tick can draw between) that falls before the next tick, at now + lead. So a jump lands on the
+    last tick before its time, up to one tick early, and never on the first tick after it."""
+    ends = [t1 for t0, t1 in zip(times, times[1:]) if t1 - t0 < lead and now < t1 <= now + lead]
+    return ends[-1] if ends else now
 
 
 def _automate_check(song, p, ctrl):
@@ -1519,6 +1534,10 @@ def _automate(song, p, ctrl):
     "value": "-4 dB"} records a flat line over those bars (the whole song with "all") at value, or at
     the value the parameter holds now: Live's API cannot delete arrangement automation, so this is
     how a bad lane is undone, mixer volume included.
+    A move goes in on Live's ticks, about 10 a second. A ramp follows the playhead; a jump (two points closer than
+    a tick) is written on the last tick before its time, so it lands up to one tick (about 0.1 s) early, never late;
+    automate_status shows the tick as measured ("tick_beats"). For steps exact to the beat, use the saved route
+    (live_automate saved=True).
     Returns at once; automate_status tells progress. Tracks are disarmed while it runs.
     Refused while a track plays Session, Back to Arrangement is lit, or Arrangement Record, its MIDI Overdub
     or Session Overdub is on: Arrangement Record would write more than the automation. And whatever happens,
@@ -1550,7 +1569,7 @@ def _automate(song, p, ctrl):
     _AUTOMATE.clear()
     _AUTOMATE.update({"state": "running", "windows": [[a / 4 + 1, b / 4 + 1] for a, b in windows],
                       "window": 0, "lanes": [l["name"] for l in lanes], "ticks": 0})
-    state = {"w": 0, "phase": "seek", "touching": False}
+    state = {"w": 0, "phase": "seek", "touching": False, "last": None, "periods": collections.deque(maxlen=8)}
 
     def finish(error=None):
         for l in lanes:
@@ -1610,33 +1629,39 @@ def _automate(song, p, ctrl):
     def tick():
         try:
             a, b = windows[state["w"]]
+            now = song.current_song_time
+            if state["last"] is not None and 0.0 < now - state["last"] < 1.0:  # the beats from the last tick
+                state["periods"].append(now - state["last"])
+            state["last"] = now
+            lead = max(state["periods"]) if state["periods"] else _TICK_S * song.tempo / 60.0
+            _AUTOMATE["tick_beats"] = round(lead, 4)
             if state["phase"] == "seek":
                 song.start_playing()
                 song.current_song_time = max(0.0, a - 4.0)  # one bar of pre-roll
                 for l in lanes:
                     l["param"].value = value_at(l["curve"], a)
-                state["phase"] = "wait"
+                state["phase"], state["last"] = "wait", None  # Live moves the playhead on its next tick
             elif state["phase"] == "wait":
-                if song.current_song_time >= a - 0.5:
+                if now >= a - 0.5:
                     song.record_mode = True
                     state["phase"] = "write"
             else:
-                now = song.current_song_time
-                if not state["touching"] and now >= a:
+                written = [_written_for(l["times"], now, lead) for l in lanes]
+                if not state["touching"] and max(written) >= a:
                     for l in lanes:
                         l["param"].begin_gesture()
                     state["touching"] = True
                 if state["touching"]:
                     odd = _AUTOMATE["ticks"] % 2
-                    for l in lanes:
-                        if l["curve"][0][0] - _TICK_BEATS <= now <= l["curve"][-1][0] + _TICK_BEATS:
-                            v = value_at(l["curve"], now)
-                            prm = l["param"]
+                    for lane, t in zip(lanes, written):
+                        if lane["curve"][0][0] - _TICK_BEATS <= t <= lane["curve"][-1][0] + _TICK_BEATS:
+                            v = value_at(lane["curve"], t)
+                            prm = lane["param"]
                             # Live records only a value that changes: a flat lane gets an inaudible
                             # alternating nudge (a millionth of the range), or nothing is written. From
                             # the last point on it holds that point exactly, so a fade ends on -inf.
                             eps = (prm.max - prm.min) * 1e-6 if (odd and not prm.is_quantized
-                                                                 and now < l["curve"][-1][0]) else 0.0
+                                                                 and t < lane["curve"][-1][0]) else 0.0
                             prm.value = min(prm.max, max(prm.min, v + eps)) if v + eps <= prm.max else v - eps
                     _AUTOMATE["ticks"] += 1
                 if now >= b + 0.25:

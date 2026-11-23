@@ -319,3 +319,33 @@ def test_a_device_whose_xml_runs_in_another_order_is_not_trusted():
 def test_units_are_found_from_the_ends_of_the_range_and_the_current_value(live, xml, kind):
     rule = S.fit(live, xml)
     assert (rule.kind if rule else None) == kind
+
+
+def frequency_lane(*events):
+    """PAD's Auto Filter Frequency as Live records it: [(beat, Hz)]."""
+    evs = "".join(f'<FloatEvent Id="{i + 1}" Time="{b}" Value="{v}"/>' for i, (b, v) in enumerate(events))
+    return ('<AutomationEnvelope Id="0"><EnvelopeTarget><PointeeId Value="111"/></EnvelopeTarget><Automation><Events>'
+            f'<FloatEvent Id="0" Time="-63072000" Value="20"/>{evs}</Events></Automation></AutomationEnvelope>')
+
+
+STEP = {"target": "PAD / Auto Filter / Frequency", "points": [[48.99, "20 Hz"], [49, "150 Hz"]]}
+
+
+@pytest.mark.parametrize("recorded, off", [
+    ([(0, 20), (191.96, 20), (192.0, 150)], None),                       # as asked: the saved route
+    ([(0, 20), (191.8, 20), (191.8, 150)], None),                        # 0.05 bars early: a live pass, within its bound
+    ([(0, 20), (192.16, 20), (192.16, 150)], "lands 0.045 bars late, at 49.040"),  # Serenity's kick group, 23.11.2026
+    ([(0, 20), (191.96, 20), (192.2, 150)], "lands 0.025 bars late"),    # drawn across a tick that ends late
+    ([(0, 20), (190.0, 20), (190.0, 150)], "lands 0.495 bars early"),
+    ([(0, 20), (300.0, 20)], "is not in the saved lane"),
+])
+def test_a_recorded_step_is_compared_with_its_bar(live_set, recorded, off):
+    """Off is measured where the lane passes halfway (in semitones here), against where the plan does (48.995)."""
+    path, prefs, conn = live_set(frequency_lane(*recorded))
+    r = S.steps(conn, [STEP, {"target": "PAD / send A", "points": [[1, "-6 dB"], [9, "-12 dB"]]}], prefs=prefs)
+    assert r["state"] == "saved"
+    if off is None:
+        assert r["off"] == []
+    else:
+        assert r["off"] == [r["off"][0]] and r["off"][0].startswith("PAD / Auto Filter / Frequency: the step at bar 49 ")
+        assert off in r["off"][0]
