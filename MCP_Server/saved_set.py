@@ -818,6 +818,61 @@ def lanes(conn, prefix: str | None = None, tolerance: float = 0.5, prefs: Path |
             "lanes": out, "skipped": skipped}
 
 
+STEP_BARS = 1 / 16.0  # two points closer than a 16th are a step: about one of Live's ticks, which none can draw
+LATE_BARS = 1 / 64.0  # a step recorded later than this after the plan's is heard late (inside the kick)
+EARLY_S = 0.25  # a live pass writes a step on the last tick before it, and Live draws it from the tick before: two
+#                 ticks of 96-107 ms (Serenity, 23.11.2026). The saved route is exact.
+
+
+def steps(conn, lanes: list[dict], prefs: Path | None = None) -> dict:
+    """Every step of a plan's lanes (two points under STEP_BARS apart; a ramp follows the playhead) against the
+    saved set: where the recorded lane passes halfway between the step's two values (in dB, semitones or % of
+    the range), against where the plan does. "off" names lane and bar of each step that lands more than LATE_BARS
+    late, more than EARLY_S early, or not at all. Reads the last save; "state" says "unsaved" when Live has changed
+    the set since (save it first)."""
+    live = Live(conn)
+    path = Path(live.get("file_path")[0] or "")
+    view = SetView(live, load(path), strict=False)
+    early = EARLY_S * float(live.get("tempo")[0]) / 60.0  # beats
+    off = []
+    for lane in lanes:
+        pts = sorted(lane.get("points") or [], key=lambda p: float(p[0]))
+        jumps = [(p, q) for p, q in zip(pts, pts[1:]) if float(q[0]) - float(p[0]) < STEP_BARS and p[1] != q[1]]
+        if not jumps:
+            continue
+        c = view.control(_lane_form(lane))
+        env = next((e for e in c.track_el.findall("AutomationEnvelopes/Envelopes/AutomationEnvelope")
+                    if e.find("EnvelopeTarget/PointeeId").get("Value") == c.pointee), None)
+        rec = [(float(e.get("Time")), c.rule.axis(e.get("Value"))) for e in env.find("Automation/Events")
+               if float(e.get("Time")) > BEFORE_START] if env is not None else []
+        for p, q in jumps:
+            plan = [(t, c.rule.axis(v)) for t, v in curve(view, c, [p, q], lane.get("shape"))]
+            if plan[0][1] == plan[-1][1]:  # two names for one value ("-inf dB", "-80 dB"): no step
+                continue
+            mid, rising = (plan[0][1] + plan[-1][1]) / 2, plan[-1][1] > plan[0][1]
+            want = _crossings(plan, mid, rising)[0]
+            got = min(_crossings(rec, mid, rising), key=lambda t: abs(t - want), default=None)
+            where = f"{c.target}: the step at bar {float(q[0]):g}"
+            if got is None or abs(got - want) > view.beats_per_bar / 2:
+                off.append(f"{where} is not in the saved lane")
+            elif got - want > view.beats_per_bar * LATE_BARS:
+                off.append(f"{where} lands {(got - want) / view.beats_per_bar:.3f} bars late, at {view.bar(got):.3f}")
+            elif want - got > early:
+                off.append(f"{where} lands {(want - got) / view.beats_per_bar:.3f} bars early, at {view.bar(got):.3f}")
+    why = unsaved(path, prefs)
+    return {"set": str(path), "saved": _clock(path.stat().st_mtime), "state": "unsaved" if why else "saved",
+            "note": f"{why}; these are the saved lanes." if why else None, "off": off}
+
+
+def _crossings(events: list[tuple[float, float]], mid: float, rising: bool) -> list[float]:
+    """The times a lane, straight between its points, passes mid going up (rising) or down."""
+    out = []
+    for (t0, v0), (t1, v1) in zip(events, events[1:]):
+        if (v0 < mid <= v1) if rising else (v0 > mid >= v1):
+            out.append(t0 + (t1 - t0) * (mid - v0) / (v1 - v0))
+    return out
+
+
 def _texts(view: SetView, c: Control, values: list) -> list[str]:
     if c.rule.kind == "bool":
         return ["On" if v == "true" else "Off" for v in values]

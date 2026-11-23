@@ -115,13 +115,16 @@ def test_saved_set_jobs_go_to_the_saved_set_and_a_refusal_reads_as_the_tool_erro
     seen = []
     monkeypatch.setattr(saved_set, "patch", lambda conn, lanes, open_it: seen.append(("patch", lanes, open_it)) or {})
     monkeypatch.setattr(saved_set, "lanes", lambda conn, target: seen.append(("lanes", target)) or {"lanes": []})
+    monkeypatch.setattr(saved_set, "steps", lambda conn, plan: seen.append(("steps", plan)) or {"off": []})
     conn = Conn()
     m = tools_with(conn)
     lanes = [{"target": "PAD / send A", "points": [[96, "-6 dB"], [97, "-inf dB"]]}]
     call(m, "live_automate", lanes=lanes, saved=True)
     call(m, "live_automate", lanes=lanes, saved=True, open_set=False)
     call(m, "live_automation", target="PAD")
-    assert seen == [("patch", lanes, True), ("patch", lanes, False), ("lanes", "PAD")] and conn.sent == []
+    call(m, "live_automation", plan=lanes)
+    assert seen == [("patch", lanes, True), ("patch", lanes, False), ("lanes", "PAD"), ("steps", lanes)]
+    assert conn.sent == []
 
     def refuse(conn, lanes, open_it):
         raise saved_set.Refused("Live counts Serenity.als as changed since it opened")
