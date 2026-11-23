@@ -7,6 +7,7 @@ Toggle control surface off/on to pick up changes.
 from __future__ import absolute_import, print_function, unicode_literals
 
 import bisect
+import collections
 import re
 from . import tracks, browser, devices, arrangement, audio, automation, params, lom, live
 
@@ -844,6 +845,9 @@ def _record_automation(song, p, ctrl):
 
     if not auto_lanes:
         return {"error": "no automation lanes provided"}
+    refusal = _record_refusal(song)  # it promises to leave the clips alone
+    if refusal:
+        return {"error": refusal}
 
     # Calculate total beats from plan
     total_beats = 0
@@ -1251,6 +1255,10 @@ def _get_registry():
             "handler": lambda song, p, ctrl: dict(_AUTOMATE),
             "modifying": False,
         },
+        "record_check": {
+            "handler": lambda song, p, ctrl: _record_check(song, p, ctrl),
+            "modifying": True,  # reads Live: the main thread
+        },
     }
 
 
@@ -1361,6 +1369,48 @@ def execute(command_type, params, song, ctrl):
 _AUTOMATE = {"state": "idle"}
 _TICK_BEATS = 0.125  # curve resolution of the precomputed values
 
+# Arrangement Record writes every track that does not follow the arrangement into it: a track playing or
+# launching a Session clip, or one stopped in Session (Back to Arrangement lit), and that cuts its clips
+# there. An automate pass over two windows, run after scenes were auditioned and deleted, cut the clips
+# of 19 tracks exactly where Arrangement Record went on and off; 18 undos took it back.
+_SWITCHES = (("record_mode", "Arrangement Record is already on"),
+             ("arrangement_overdub", "MIDI Arrangement Overdub is on"),
+             ("session_record", "Session Overdub is on"))
+
+
+def _record_refusal(song, switches=_SWITCHES):
+    """Why recording now would write more into the arrangement than asked, or None."""
+    session = [t.name for t in song.tracks if t.playing_slot_index >= 0 or t.fired_slot_index >= 0
+               or getattr(t, "back_to_arranger", False)]
+    why = []
+    if session or song.back_to_arranger:
+        who = ("%s play%s Session" % (live._listed("'%s'" % n for n in session), "" if len(session) > 1 else "s")
+               if session else "a track was stopped in Session")
+        why.append("%s, not the arrangement (Back to Arrangement is lit): Arrangement Record would write that over "
+                   "the arrangement's clips, and a take would hear it. Press Back to Arrangement first" % who)
+    why += [text for attr, text in switches if getattr(song, attr)]
+    return "Not recording: %s." % "; ".join(why) if why else None
+
+
+def _arrangement(song):
+    """Every arrangement clip as (track, start, end, name), counted: what a pass must leave as it found it."""
+    return collections.Counter((t.name, round(c.start_time, 4), round(c.end_time, 4), c.name)
+                               for t in song.tracks for c in live._clips(t))
+
+
+def _touched(before, after):
+    """The tracks whose arrangement clips differ between two _arrangement counts."""
+    return sorted({k[0] for k in (before - after) + (after - before)})
+
+
+def _record_check(song, p, ctrl):
+    """For a recorder that fires Session slots and leaves Arrangement Record off (macwhite's record and record_many):
+    why it should not record now, or None, and the arrangement's clips, to compare with after the take."""
+    refusal = _record_refusal(song, _SWITCHES[:1])
+    if _AUTOMATE.get("state") == "running":
+        refusal = "Not recording: an automate pass is running (it switches Arrangement Record on per window)."
+    return {"refused": refusal, "clips": [list(k) for k in sorted(_arrangement(song).elements())]}
+
 
 def _automate_param(song, track, name):
     """'volume', 'pan', 'send A'..'send L', or '<device>.<parameter>' (device by name or index).
@@ -1470,9 +1520,16 @@ def _automate(song, p, ctrl):
     the value the parameter holds now: Live's API cannot delete arrangement automation, so this is
     how a bad lane is undone, mixer volume included.
     Returns at once; automate_status tells progress. Tracks are disarmed while it runs.
+    Refused while a track plays Session, Back to Arrangement is lit, or Arrangement Record, its MIDI Overdub
+    or Session Overdub is on: Arrangement Record would write more than the automation. And whatever happens,
+    the arrangement's clips are compared before and after: a pass that changed them is undone (Live's undo,
+    checked after each step) and ends in "error" naming the tracks, "repaired" saying whether it worked.
     """
     if _AUTOMATE.get("state") == "running":
         raise RuntimeError("automate is already running")
+    refusal = _record_refusal(song)
+    if refusal:
+        raise RuntimeError(refusal)
     lanes = _automate_lanes(song, p["lanes"])
     # windows: the spans that hold moves, merged when they touch
     spans = sorted((l["curve"][0][0], l["curve"][-1][0]) for l in lanes)
@@ -1482,6 +1539,8 @@ def _automate(song, p, ctrl):
             windows[-1][1] = max(windows[-1][1], b)
         else:
             windows.append([a, b])
+    before = _arrangement(song)
+    undo_cap = len(windows) * (2 * len(lanes) + 2)  # per window a seek value and a recording per lane, and a margin
     armed = [t for t in song.tracks if getattr(t, "can_be_armed", False) and t.arm]
     for t in armed:
         t.arm = False
@@ -1501,6 +1560,34 @@ def _automate(song, p, ctrl):
                 pass
         song.record_mode = False
         song.stop_playing()
+        ctrl.schedule_message(3, lambda: guard(error, 0, []))  # a few ticks for Live to lay the take down
+
+    def guard(error, undone, cut):
+        """Compare the arrangement with the one before the pass. Changed: undo one step and look again on the next
+        tick, up to undo_cap steps; still changed then, every undo is redone, leaving the set as the pass left it."""
+        try:
+            touched = _touched(before, _arrangement(song))
+            cut = cut or touched
+            if touched and undone < undo_cap and song.can_undo:
+                song.undo()
+                return ctrl.schedule_message(1, lambda: guard(error, undone + 1, cut))
+            for _ in range(undone if touched else 0):
+                song.redo()
+            if cut:
+                which = "%s (%d track%s)" % (live._listed("'%s'" % n for n in cut), len(cut), "s" if len(cut) > 1 else "")
+                error = ("The pass changed the arrangement clips of %s, and %d undos did not bring them back, so they "
+                         "were redone: the set is as the pass left it; put those clips back by hand (Live's Undo goes "
+                         "back through the pass)" % (which, undone) if touched else
+                         "The pass changed the arrangement clips of %s, so it was undone (%d undos): the clips are as "
+                         "before, and the automation went with it. Find what made those tracks record (a Session clip, "
+                         "Back to Arrangement) and run it again" % (which, undone)) + (
+                         " (the pass itself stopped on: %s)" % error if error else "")
+                _AUTOMATE.update({"touched": cut, "repaired": not touched})
+        except Exception as e:
+            error = error or "checking the arrangement after the pass: %s" % e
+        restore(error)
+
+    def restore(error):
         song.session_automation_record = saved["automation_arm"]
         song.loop = saved["loop"]
         for l in lanes:  # the seek set values by hand; hand these lanes back to their automation, and

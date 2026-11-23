@@ -232,6 +232,7 @@ class Track:
         self.muted_via_solo = False        # Live sets it on every track another track's solo silences
         self.can_be_armed = True
         self.clip_slots = [Slot(), Slot()]
+        self.playing_slot_index = self.fired_slot_index = -1  # following the arrangement
         self.meter_listeners = []  # output_meter_left exists only on a track given a meter (MeterTransport)
 
     def add_output_meter_left_listener(self, fn):
@@ -308,6 +309,8 @@ class Song:
         self.tempo, self.loop, self.loop_start, self.loop_length = 124.0, True, 0.0, 32.0
         self.current_song_time, self.is_playing, self.metronome, self.record_mode = 0.0, False, False, False
         self.session_automation_record, self.song_length = False, 1024.0
+        self.back_to_arranger = self.arrangement_overdub = self.session_record = False
+        self.history, self.future = [], []  # undo steps, each an (undo, redo) pair
         self.scenes = [Scene("Intro"), Scene("Groove")]
         # as read from a real set, 20.11.2026: song.groove_pool.grooves, each with a name
         self.groove_pool = types.SimpleNamespace(grooves=[Groove(n) for n in (
@@ -317,6 +320,20 @@ class Song:
             r.can_be_armed = False
         self.view = types.SimpleNamespace(selected_track=None, selected_device=None)
         self.view.select_device = lambda d: setattr(self.view, "selected_device", d)
+
+    @property
+    def can_undo(self):
+        return bool(self.history)
+
+    def undo(self):
+        step = self.history.pop()
+        step[0]()
+        self.future.append(step)
+
+    def redo(self):
+        step = self.future.pop()
+        step[1]()
+        self.history.append(step)
 
     def create_scene(self, i):
         self.scenes.insert(i, Scene(""))

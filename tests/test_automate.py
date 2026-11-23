@@ -1,7 +1,9 @@
 """live_automate on a fake transport that records: each call writes its own bars and nothing else."""
+import re
+
 import pytest
 
-from fake_live import Device, Param, Transport, db, demo_song, lom
+from fake_live import Clip, Device, Param, Transport, db, demo_song, lom
 from handlers import dispatch
 
 
@@ -151,3 +153,121 @@ def test_the_check_reads_the_recorded_curve_eased_and_in_both_lane_forms():
         assert all(x["off"] < 0.01 for x in r["lanes"]), r
     song.current_song_time, g.value = 44 * 4.0, -0.75  # a straight line's value a quarter of the way: not what was eased
     assert dispatch.execute("automate_check", {"lanes": lanes[:1]}, song, live)["lanes"][0]["off"] > 0.03
+
+
+LANE = [{"target": "PAD / STAB / Utility / Output", "points": [[149, "-4 dB"], [153, "0 dB"]]},
+        {"target": "PAD / STAB / Utility / Output", "points": [[173, "0 dB"], [177, "-4 dB"]]}]
+
+
+def clips(song):
+    return {t.name: [(c.start_time, c.end_time) for c in t.arrangement_clips] for t in song.tracks}
+
+
+def test_a_track_playing_session_is_refused_before_anything_changes(song):
+    """A pass run after scenes were auditioned cut 19 tracks' clips where Arrangement Record went on and off."""
+    drums, bass = song.tracks[2], song.tracks[1]
+    drums.playing_slot_index = 0
+    bass.arm = True
+    with pytest.raises(RuntimeError, match=r"Not recording: 'DRUMS' plays Session, not the arrangement "
+                                           r"\(Back to Arrangement is lit\).*Press Back to Arrangement first\.$"):
+        dispatch.execute("automate", {"lanes": LANE[:1]}, song, Transport(song, [gain(song)]))
+    assert dispatch._AUTOMATE.get("state") != "running"
+    assert bass.arm and song.loop and not song.record_mode and not song.is_playing  # nothing touched
+
+
+@pytest.mark.parametrize("state, says", [
+    ({"back_to_arranger": True}, "a track was stopped in Session, not the arrangement"),
+    ({"fired": True}, "'DRUMS' plays Session"),
+    ({"arrangement_overdub": True}, "MIDI Arrangement Overdub is on"),
+    ({"session_record": True}, "Session Overdub is on"),
+    ({"record_mode": True}, "Arrangement Record is already on"),
+])
+def test_every_state_that_records_more_than_automation_is_refused(song, state, says):
+    if state.pop("fired", False):
+        song.tracks[2].fired_slot_index = 1  # a launched clip, still blinking
+    for attr, v in state.items():
+        setattr(song, attr, v)
+    with pytest.raises(RuntimeError, match=re.escape(says)):
+        dispatch.execute("automate", {"lanes": LANE[:1]}, song, Transport(song, [gain(song)]))
+
+
+def cutting(song, tracks, undoable=True):
+    """Arrangement Record for a track that does not follow the arrangement, though nothing shows it: each take cuts
+    the clips of TRACKS over the beats it recorded, then writes the automation, two undo steps; undoable=False puts
+    the cut where no undo reaches it."""
+
+    def cut(a, b):
+        old = {t: list(t.arrangement_clips) for t in tracks}
+        new = {t: [part for c in t.arrangement_clips for part in
+                   ([c] if c.end_time <= a or c.start_time >= b else
+                    [Clip(c.name, s, e) for s, e in ((c.start_time, a), (b, c.end_time)) if e > s])] for t in tracks}
+        put = lambda clips: [setattr(t, "arrangement_clips", list(cs)) for t, cs in clips.items()]
+        put(new)
+        if undoable:
+            song.history.append((lambda: put(old), lambda: put(new)))
+        song.history.append((lambda: None, lambda: None))  # the automation
+
+    class Cutting(type(song)):
+        @property
+        def record_mode(self):
+            return self.take_from is not None
+
+        @record_mode.setter
+        def record_mode(self, on):
+            if on and self.take_from is None:
+                self.take_from = self.current_song_time
+            elif not on and self.take_from is not None:
+                a, self.take_from = self.take_from, None
+                cut(a, self.current_song_time)
+
+    song.take_from = None
+    song.__class__ = Cutting
+    return song
+
+
+def test_a_pass_that_cut_clips_is_undone_to_a_match_and_says_so(song):
+    drums, pad = song.tracks[2], song.tracks[4]
+    drums.arrangement_clips = [Clip("Loop", 512.0, 768.0)]  # bars 129-192: both windows
+    pad.arrangement_clips = [Clip("Beat", 512.0, 640.0), Clip("Beat", 640.0, 768.0)]
+    earlier = []
+    song.history.append((lambda: earlier.append("undone"), lambda: earlier.remove("undone")))  # Marc's own last step
+    before = clips(song)
+    cutting(song, [drums, pad])
+    live = Transport(song, [gain(song)])
+    dispatch.execute("automate", {"lanes": LANE}, song, live)
+    live.run()
+    a = dispatch._AUTOMATE
+    assert a["state"] == "error" and a["repaired"] is True and a["touched"] == ["DRUMS", "Drums"]
+    assert "changed the arrangement clips of 'DRUMS', 'Drums' (2 tracks), so it was undone (4 undos)" in a["error"]
+    assert clips(song) == before and earlier == []  # back to a match, and not one step further
+    assert len(song.history) == 1 and not song.record_mode and song.loop  # the set as it was
+
+
+def test_an_undo_that_cannot_restore_is_an_error_naming_it_and_the_set_is_left_as_the_pass_left_it(song):
+    drums = song.tracks[2]
+    drums.arrangement_clips = [Clip("Loop", 512.0, 768.0)]
+    marcs = []
+    for k in range(3):  # Marc's own steps before the pass: undone on the way, and redone
+        song.history.append((lambda k=k: marcs.append(k), lambda k=k: marcs.remove(k)))
+    cutting(song, [drums], undoable=False)
+    live = Transport(song, [gain(song)])
+    dispatch.execute("automate", {"lanes": LANE}, song, live)
+    live.run()
+    a = dispatch._AUTOMATE
+    assert a["state"] == "error" and a["repaired"] is False and a["touched"] == ["DRUMS"]
+    assert re.search(r"changed the arrangement clips of 'DRUMS' \(1 track\), and \d+ undos did not bring them back, "
+                     r"so they were redone: the set is as the pass left it", a["error"])
+    assert clips(song)["DRUMS"] == [(512.0, 591.5), (608.25, 687.5), (704.25, 768.0)]  # cut at both windows, as left
+    assert marcs == [] and len(song.history) == 5  # Marc's steps undone on the way and redone
+
+
+def test_a_recorder_is_told_what_stops_it_and_gets_the_clips_to_compare(song):
+    song.tracks[2].arrangement_clips = [Clip("Loop", 128.0, 256.0)]
+    r = dispatch.execute("record_check", {}, song, None)
+    assert r == {"refused": None, "clips": [["DRUMS", 128.0, 256.0, "Loop"], ["SERUM BASS", 192.0, 208.0, "Bass A"]]}
+    song.arrangement_overdub = True  # harmless while Arrangement Record stays off
+    assert dispatch.execute("record_check", {}, song, None)["refused"] is None
+    song.tracks[0].playing_slot_index = 1
+    assert "'BASS MID' plays Session" in dispatch.execute("record_check", {}, song, None)["refused"]
+    song.tracks[0].playing_slot_index, song.record_mode = -1, True
+    assert dispatch.execute("record_check", {}, song, None)["refused"] == "Not recording: Arrangement Record is already on."
