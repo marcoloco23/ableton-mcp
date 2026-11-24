@@ -60,6 +60,15 @@ def test_a_value_live_does_not_keep_is_an_error(monkeypatch):
         draw(song, points=[[0, "0 st"]])
 
 
+def test_a_raw_difference_that_shows_the_same_value_is_not_an_error(monkeypatch):
+    """Live, 24.11.2026: 0 st read back as a raw number off by more than the slack, shown as 0 st."""
+    song, t = rig()
+    import fake_live
+    t.devices[0].parameters[0].str_for_value = lambda v: "%.0f st" % v if abs(v) > 2 else "0 st"
+    monkeypatch.setattr(fake_live.Envelope, "value_at_time", lambda self, x: 1.5)
+    assert draw(song, points=[[0, "0 st"]])["steps"] == 1
+
+
 def test_clear_empties_the_envelope():
     song, t = rig()
     draw(song, points=[[0, "+2 st"]])
