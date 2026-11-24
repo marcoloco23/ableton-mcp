@@ -1195,6 +1195,10 @@ def _get_registry():
             "handler": live.set_values,
             "modifying": True,
         },
+        "live_batch": {
+            "handler": lambda song, p, ctrl: _live_batch(song, p, ctrl),
+            "modifying": True,
+        },
         "live_notes_read": {
             "handler": live.read_notes,
             "modifying": True,
@@ -1284,6 +1288,66 @@ def _lom_batch(song, p, ctrl):
     return {"results": results, "done": sum(1 for r in results if r["ok"]), "total": len(p.get("ops", []))}
 
 
+# What a job may be, and what can be checked of it without doing it.
+_JOBS = ("live_set", "live_notes_write", "live_clips", "live_tracks", "live_locators", "live_load", "live_warp",
+         "simpler_region", "live_transport")
+
+
+def _preview_job(song, job):
+    """One job, checked and not done: what it will touch, or why it can't."""
+    name = job.get("do")
+    if name not in _JOBS:
+        raise ValueError("a job is {\"do\": one of %s, ...its own fields}; got '%s'" % (", ".join(_JOBS), name))
+    if name == "live_set":
+        return live.check_changes(song, job.get("changes"))
+    if name == "live_load" and (job.get("bar") is not None or job.get("scene") is not None):
+        import os
+        if not os.path.isfile(str(job.get("item"))):
+            raise ValueError("no such file: %s" % job.get("item"))
+    if name == "live_notes_write":
+        live._midi_track(song, job["track"])
+        n = len(job.get("notes") or [])
+        return "%s: %d notes into bars %s-%s" % (job["track"], n, job["start_bar"], job["start_bar"] + job["bars"] - 1)
+    if job.get("track"):
+        lom.target(song, job["track"])
+    return "%s %s" % (name, job.get("action") or job.get("track") or "")
+
+
+def _live_batch(song, p, ctrl):
+    """Whole jobs in order, as ONE step in Live's undo: Cmd+Z once takes all of it back.
+
+    Every job is checked first (preview): if one is wrong, nothing is done and each problem is listed. preview=true
+    stops there. If Live then refuses a job, the jobs before it stay done and are named: they are in the one undo
+    step, so one Cmd+Z takes them back. Nothing is undone here: an undo with nothing of ours in it would take back
+    the musician's own last step.
+    """
+    jobs = p.get("jobs") or []
+    plan, errors = [], []
+    for k, job in enumerate(jobs):
+        try:
+            plan.append(_preview_job(song, job))
+        except Exception as e:
+            errors.append("job %d (%s): %s" % (k + 1, job.get("do"), e))
+    if not jobs:
+        raise ValueError("jobs is empty")
+    if errors:
+        raise ValueError("nothing was done:\n" + "\n".join(errors))
+    if p.get("preview"):
+        return {"preview": plan}
+    reg, results = _get_registry(), []
+    song.begin_undo_step()
+    try:
+        for k, job in enumerate(jobs):
+            try:
+                results.append(reg[job["do"]]["handler"](song, {a: b for a, b in job.items() if a != "do"}, ctrl))
+            except Exception as e:
+                raise RuntimeError("job %d (%s) failed in Live: %s. The %d job(s) before it are done; one Cmd+Z takes "
+                                   "them all back" % (k + 1, job["do"], e, k))
+    finally:
+        song.end_undo_step()
+    return {"done": len(results), "results": results}
+
+
 def _simpler_region(song, p, ctrl):
     """Set what a Simpler shows: the sample region in ms, warp, mode and fades.
 
@@ -1327,7 +1391,7 @@ def _simpler_region(song, p, ctrl):
 
 
 # Jobs that can outlast the usual 10 s on Live's main thread (a big set, a browser scan, many clips).
-_LONG = ("lom_batch", "live_overview", "live_audit", "live_track", "live_notes_read", "live_notes_write", "live_clips", "live_load")
+_LONG = ("lom_batch", "live_batch", "live_overview", "live_audit", "live_track", "live_notes_read", "live_notes_write", "live_clips", "live_load")
 
 
 def timeout(command_type):

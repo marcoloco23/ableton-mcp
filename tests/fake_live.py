@@ -326,6 +326,12 @@ class Song:
     def can_undo(self):
         return bool(self.history)
 
+    def begin_undo_step(self):
+        self.steps = getattr(self, "steps", []) + ["begin"]
+
+    def end_undo_step(self):
+        self.steps.append("end")
+
     def undo(self):
         step = self.history.pop()
         step[0]()

@@ -186,6 +186,21 @@ def register(mcp: Any, get_ableton_connection: Callable[[], Any]) -> None:
         """
         return out(call("live_set", changes=changes))
 
+    @mcp.tool(annotations=_write("Run a whole job in one undo step", destructive=True, idempotent=False))
+    def live_batch(ctx: Context, jobs: list[dict], preview: bool = False) -> str:
+        """Do a whole job in one call and one undo step: one Cmd+Z in Live takes all of it back.
+
+        jobs, in order: {"do": "live_set" | "live_notes_write" | "live_clips" | "live_tracks" | "live_locators" |
+        "live_load" | "live_warp" | "simpler_region" | "live_transport", ...that tool's own arguments}. Every job is
+        checked first; if one is wrong nothing is done and each problem is listed. preview=True stops after the check
+        and says what each job will do. If Live refuses a job midway, the jobs before it stay done (and named).
+
+        Examples:
+          live_batch([{"do": "live_notes_write", "track": "SUB", "start_bar": 33, "bars": 1, "notes": [[33, 1, 38, 0.5, 100]]},
+                      {"do": "live_set", "changes": [{"target": "SUB / volume", "value": "-6 dB"}]}], preview=True)
+        """
+        return out(call("live_batch", jobs=jobs, preview=preview))
+
     @mcp.tool(annotations=_read("Read MIDI notes in bars"))
     def live_notes_read(ctx: Context, track: str, bars: str | None = None, scene: str | int | None = None,
                         as_grid: bool = False, response_format: Format = "concise") -> str:
