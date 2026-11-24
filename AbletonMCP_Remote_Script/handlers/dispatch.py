@@ -9,7 +9,7 @@ from __future__ import absolute_import, print_function, unicode_literals
 import bisect
 import collections
 import re
-from . import tracks, browser, devices, arrangement, audio, automation, params, lom, live
+from . import tracks, browser, devices, arrangement, audio, automation, params, lom, live, pump
 
 
 def _resolve_track(song, track_index, track_type):
@@ -1353,6 +1353,8 @@ def execute(command_type, params, song, ctrl):
     reg = _get_registry()
     if command_type not in reg:
         raise ValueError("Unknown dynamic command: " + command_type)
+    if reg[command_type].get("modifying", False):  # on the main thread, where a timer may start
+        pump.install(ctrl)
     return reg[command_type]["handler"](song, params, ctrl)
 
 

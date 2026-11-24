@@ -12,6 +12,7 @@ from . import arrangement
 from . import audio
 from . import midi
 from . import automation
+from . import pump
 from . import dispatch
 
 __all__ = [
@@ -26,5 +27,6 @@ __all__ = [
     "audio",
     "midi",
     "automation",
+    "pump",
     "dispatch",
 ]
