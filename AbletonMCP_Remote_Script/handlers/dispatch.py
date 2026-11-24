@@ -1231,6 +1231,10 @@ def _get_registry():
             "handler": live.scenes,
             "modifying": True,
         },
+        "live_clip_envelope": {
+            "handler": live.clip_envelope,
+            "modifying": True,
+        },
         "live_warp": {
             "handler": live.warp,
             "modifying": True,
@@ -1289,7 +1293,7 @@ def _lom_batch(song, p, ctrl):
 
 
 # What a job may be, and what can be checked of it without doing it.
-_JOBS = ("live_set", "live_notes_write", "live_clips", "live_tracks", "live_locators", "live_load", "live_warp",
+_JOBS = ("live_set", "live_notes_write", "live_clips", "live_tracks", "live_locators", "live_load", "live_warp", "live_clip_envelope",
          "simpler_region", "live_transport")
 
 
