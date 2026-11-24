@@ -34,7 +34,7 @@ def test_a_linear_ramp_rises_in_small_steps_and_the_last_value_holds_to_the_end(
 
 def test_the_arrangement_and_what_is_no_parameter_are_refused_before_anything():
     song, t = rig()
-    with pytest.raises(ValueError, match="Session clips only.*to_arrangement"):
+    with pytest.raises(ValueError, match="Session clips only.*leaves the envelope behind"):
         live.clip_envelope(song, {"target": "SERUM BASS / Serum 2 / Transpose", "points": [[0, "0 st"]]}, Ctrl())
     with pytest.raises(ValueError, match="pitch bend is no parameter"):
         live.clip_envelope(song, {"target": "SERUM BASS / Serum 2", "scene": 1, "points": [[0, "0 dB"]]}, Ctrl())

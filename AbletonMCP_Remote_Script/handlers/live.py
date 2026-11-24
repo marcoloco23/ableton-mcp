@@ -863,7 +863,8 @@ def clip_envelope(song, p, ctrl):
     the clip's end. clear=true empties the envelope first. Every point is read back; a difference is an error."""
     if p.get("scene") is None:
         raise ValueError("clip_envelope writes Session clips only: give scene (Live's API has no envelope on arrangement "
-                         "clips). Draw it in a Session clip, then live_clips(\"to_arrangement\")")
+                         "clips, and live_clips(\"to_arrangement\") leaves the envelope behind: for an arranged track use "
+                         "live_automate(saved=True))")
     tg = lom.target(song, p["target"])
     if tg.param is None:
         raise ValueError("'%s': name a device's parameter (\"Track / Device / Param\"); a MIDI controller such as the "
@@ -910,7 +911,8 @@ def clip_envelope(song, p, ctrl):
         if shape == "linear" and k + 1 < len(raw):  # its first step sits half a step up the ramp
             slack += abs(raw[k + 1][1] - v) / max(1, int(round((raw[k + 1][0] - b) / _STEP)))
         if abs(got - v) > slack:
-            off.append("beat %g: asked for %s, the clip has %s" % (b, tg.param.str_for_value(v), tg.param.str_for_value(got)))
+            off.append("beat %g: asked for %s (raw %.4f), the clip has %s (raw %.4f)"
+                       % (b, tg.param.str_for_value(v), v, tg.param.str_for_value(got), got))
     if off:
         raise RuntimeError("written, but not as asked: %s" % "; ".join(off))
     return {"target": p["target"], "scene": number, "clip": clip.name, "steps": len(steps), "shape": shape,

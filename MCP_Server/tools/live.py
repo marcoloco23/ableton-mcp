@@ -431,8 +431,9 @@ def register(mcp: Any, get_ableton_connection: Callable[[], Any]) -> None:
     @mcp.tool(annotations=_write("Draw automation into a Session clip", destructive=True, idempotent=True))
     def live_clip_envelope(ctx: Context, target: str, scene: str | int, points: list[list[float | str]],
                            shape: Literal["linear", "hold"] = "linear", clear: bool = False) -> str:
-        """Draw automation into the SESSION clip in scene on target's track (Live's API has no envelopes on arrangement
-        clips: draw here, then live_clips("to_arrangement")). target "Track / Device / Param"; points [[beat, value], ...]
+        """Draw automation into the SESSION clip in scene on target's track, for jams and tests: live_clips("to_arrangement")
+        does NOT carry the envelope (measured in Live 24.11.2026), so for an arranged track use live_automate(saved=True) on
+        the instrument's Transpose. target "Track / Device / Param"; points [[beat, value], ...]
         with beats from the clip's start (0 = its first beat) and values as Live shows them. shape "linear" ramps in
         1/64-beat steps between the points, "hold" keeps each value until the next; the last value holds to the clip's end.
         clear empties the parameter's envelope first. Every point is read back; a difference is an error.
