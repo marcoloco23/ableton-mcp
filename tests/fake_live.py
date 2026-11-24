@@ -90,6 +90,24 @@ class Note:
         self.__dict__.update(extra)
 
 
+class Envelope:
+    """Live's Envelope: flat steps, later ones over earlier; value_at_time reads them, else the parameter's value."""
+
+    def __init__(self, param):
+        self.param, self.steps = param, []
+
+    def insert_step(self, time, length, value):
+        if not self.param.min <= value <= self.param.max:
+            raise ValueError("out of range")
+        self.steps.append((time, time + length, value))
+
+    def value_at_time(self, t):
+        for a, b, v in reversed(self.steps):
+            if a - 1e-9 <= t < b - 1e-9:
+                return v
+        return self.param.value
+
+
 class Clip:
     """An arrangement clip over [start, end) in song beats, or a session clip (start 0). With loop=(a, b)
     it loops clip time a..b after playing from its start marker to b."""
@@ -103,6 +121,21 @@ class Clip:
         self.length = self.loop_end - self.loop_start
         self.warping, self.pitch_coarse = True, 0
         self.groove = None  # a Groove from the song's groove pool, or None as in Live
+
+    def create_automation_envelope(self, param):
+        self.envelopes = getattr(self, "envelopes", {})
+        self.envelopes[id(param)] = Envelope(param)
+        return self.envelopes[id(param)]
+
+    def automation_envelope(self, param):
+        return getattr(self, "envelopes", {}).get(id(param))
+
+    def clear_envelope(self, param):
+        getattr(self, "envelopes", {}).pop(id(param), None)
+
+    @property
+    def has_envelopes(self):
+        return bool(getattr(self, "envelopes", {}))
 
     def get_notes_extended(self, from_pitch, pitch_span, from_time, time_span):
         return [n for n in self.notes if from_pitch <= n.pitch < from_pitch + pitch_span

@@ -428,6 +428,21 @@ def register(mcp: Any, get_ableton_connection: Callable[[], Any]) -> None:
         """
         return out(call("live_load", track=track, item=item, scene=scene, bar=bar, clip=clip))
 
+    @mcp.tool(annotations=_write("Draw automation into a Session clip", destructive=True, idempotent=True))
+    def live_clip_envelope(ctx: Context, target: str, scene: str | int, points: list[list[float | str]],
+                           shape: Literal["linear", "hold"] = "linear", clear: bool = False) -> str:
+        """Draw automation into the SESSION clip in scene on target's track (Live's API has no envelopes on arrangement
+        clips: draw here, then live_clips("to_arrangement")). target "Track / Device / Param"; points [[beat, value], ...]
+        with beats from the clip's start (0 = its first beat) and values as Live shows them. shape "linear" ramps in
+        1/64-beat steps between the points, "hold" keeps each value until the next; the last value holds to the clip's end.
+        clear empties the parameter's envelope first. Every point is read back; a difference is an error.
+        A MIDI pitch bend is no parameter and can't be drawn: bend the instrument's Transpose instead.
+
+        Example: a note at beat 2.5 bent up 1.79 st over a 16th and held, then back on beat 3 ->
+          live_clip_envelope("BEND TEST / Operator / Transpose", scene=1, points=[[0, "0 st"], [2.5, "0 st"], [2.75, "+1.79 st"], [3, "0 st"]])
+        """
+        return out(call("live_clip_envelope", target=target, scene=scene, points=points, shape=shape, clear=clear))
+
     @mcp.tool(annotations=_write("Warp an audio clip straight", destructive=True, idempotent=True))
     def live_warp(ctx: Context, track: str, bpm: float, first_beat_s: float = 0.0, bar: float | None = None,
                   scene: str | int | None = None) -> str:

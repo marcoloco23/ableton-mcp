@@ -832,6 +832,93 @@ def _groove_name(groove):
     return "none" if groove is None else str(groove.name)
 
 
+# --- clip envelopes ------------------------------------------------------------------------
+#
+# Live's API writes automation into a SESSION clip only (clip.create_automation_envelope answers None on an
+# arrangement clip), and only for parameters: MIDI controllers, the pitch bend among them, are not parameters, so
+# they are out of reach; a pitch move goes on the instrument's Transpose or Detune instead.
+
+_STEP = 1.0 / 64     # beats between the steps that draw a ramp
+_MOST = 4000         # steps one call may write
+
+
+def _envelope_steps(points, shape, end):
+    """[(beat, length, raw value)] drawing the points: flat steps, up to `end` (the clip's end, beats)."""
+    out = []
+    for k, (at, v) in enumerate(points):
+        stop = points[k + 1][0] if k + 1 < len(points) else end
+        if shape == "hold" or k + 1 == len(points):
+            out.append((at, stop - at, v))
+            continue
+        w, n = points[k + 1][1], max(1, int(round((stop - at) / _STEP)))
+        size = (stop - at) / n
+        out += [(at + i * size, size, v + (w - v) * (i + 0.5) / n) for i in range(n)]
+    return out
+
+
+def clip_envelope(song, p, ctrl):
+    """Draw automation into a Session clip: target is "Track / Device / Param" (shown values, e.g. "+1.79 st"), on the
+    track's clip in scene. points [[beat, value], ...] with beats from the clip's start (0 is its first beat); shape
+    "linear" ramps between them in 1/64-beat steps, "hold" keeps each value until the next one; the last value holds to
+    the clip's end. clear=true empties the envelope first. Every point is read back; a difference is an error."""
+    if p.get("scene") is None:
+        raise ValueError("clip_envelope writes Session clips only: give scene (Live's API has no envelope on arrangement "
+                         "clips). Draw it in a Session clip, then live_clips(\"to_arrangement\")")
+    tg = lom.target(song, p["target"])
+    if tg.param is None:
+        raise ValueError("'%s': name a device's parameter (\"Track / Device / Param\"); a MIDI controller such as the "
+                         "pitch bend is no parameter, so Live's API can't draw it" % p["target"])
+    if tg.setting == "volume" or tg.param == tg.track.mixer_device.volume:
+        raise ValueError("'%s': fades and rides go on a Utility's gain, so the fader stays free" % p["target"])
+    shape = p.get("shape", "linear")
+    if shape not in ("linear", "hold"):
+        raise ValueError("shape is linear or hold, not '%s'" % shape)
+    pts = p.get("points") or []
+    if not pts and not p.get("clear"):
+        raise ValueError("points is empty")
+    slot, number = _slot(song, tg.track, p["scene"])
+    if not slot.has_clip:
+        raise ValueError("'%s' has no clip in scene %d" % (tg.track.name, number))
+    clip = slot.clip
+    end = float(clip.loop_end if getattr(clip, "looping", False) else clip.end_marker)
+    raw = []
+    for b, v in pts:
+        b = float(b)
+        if not 0.0 <= b < end:
+            raise ValueError("beat %g is outside the clip (0 to %g)" % (b, end))
+        raw.append((b, params.resolve_value(tg.param, v)))
+    if raw != sorted(raw, key=lambda x: x[0]) or len({b for b, _ in raw}) != len(raw):
+        raise ValueError("points go in order, each beat once")
+    steps = _envelope_steps(raw, shape, end)
+    if len(steps) > _MOST:
+        raise ValueError("%d steps are too many for one call (at most %d): shorten the ramps" % (len(steps), _MOST))
+    if p.get("clear"):
+        clip.clear_envelope(tg.param)
+    env = None
+    if raw:
+        env = clip.automation_envelope(tg.param) or clip.create_automation_envelope(tg.param)
+        if env is None:
+            raise RuntimeError("Live gave no envelope for '%s' on this clip" % p["target"])
+        for at, length, v in steps:
+            env.insert_step(at, length, v)
+    span = float(tg.param.max - tg.param.min)
+    off = []
+    for k, (b, v) in enumerate(raw):
+        # a point is the start of its step: a ramp's first step sits half a step up the ramp, so look just past it
+        got = float(env.value_at_time(b + (_STEP / 4.0 if shape == "linear" else 1e-3)))
+        slack = 0.01 * span
+        if shape == "linear" and k + 1 < len(raw):  # its first step sits half a step up the ramp
+            slack += abs(raw[k + 1][1] - v) / max(1, int(round((raw[k + 1][0] - b) / _STEP)))
+        if abs(got - v) > slack:
+            off.append("beat %g: asked for %s, the clip has %s" % (b, tg.param.str_for_value(v), tg.param.str_for_value(got)))
+    if off:
+        raise RuntimeError("written, but not as asked: %s" % "; ".join(off))
+    return {"target": p["target"], "scene": number, "clip": clip.name, "steps": len(steps), "shape": shape,
+            "points": [[b, tg.param.str_for_value(v)] for b, v in raw]}
+
+
+# --- session clips -------------------------------------------------------------------------
+
 def _slot_clip(song, t, c):
     """A session clip in detail: its name, length in bars and, for audio, the file and transpose."""
     out = {"track": t.name, "name": c.name, "length_bars": round(c.length / lom.beats_per_bar(song), 4)}
