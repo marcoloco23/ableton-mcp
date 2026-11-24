@@ -470,6 +470,24 @@ def _prepare(song, change, earlier):
     return (_route(t, attr), lambda: setattr(t, attr, option or pick()), lambda: setattr(t, attr, old), read)
 
 
+def check_changes(song, changes):
+    """live_set's changes, checked and not applied: "target: before -> value", or the problem with each."""
+    out, errors, earlier = [], [], []
+    for k, change in enumerate(changes or []):
+        try:
+            before = _prepare(song, change, earlier)[0]
+            tg = lom.target(song, change["target"])
+            earlier.append((tg.track, tg.setting))
+            out.append("%s: %s -> %s" % (change["target"], before, change["value"]))
+        except Exception as e:
+            errors.append("change %d (%s): %s" % (k + 1, change.get("target") if isinstance(change, dict) else change, e))
+    if errors:
+        raise ValueError("; ".join(errors))
+    if not out:
+        raise ValueError("changes is empty")
+    return out
+
+
 def set_values(song, p, ctrl):
     """Apply every change or none. Each target and value is checked before the first is set; if Live
     still refuses one, the changes already made are put back from their recorded before-values."""
