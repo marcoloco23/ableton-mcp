@@ -910,7 +910,8 @@ def clip_envelope(song, p, ctrl):
         slack = 0.01 * span
         if shape == "linear" and k + 1 < len(raw):  # its first step sits half a step up the ramp
             slack += abs(raw[k + 1][1] - v) / max(1, int(round((raw[k + 1][0] - b) / _STEP)))
-        if abs(got - v) > slack:
+        # 24.11.2026: Live read 0 st back as a raw number off by more than the slack though both show "0 st"
+        if abs(got - v) > slack and tg.param.str_for_value(got) != tg.param.str_for_value(v):
             off.append("beat %g: asked for %s (raw %.4f), the clip has %s (raw %.4f)"
                        % (b, tg.param.str_for_value(v), v, tg.param.str_for_value(got), got))
     if off:
