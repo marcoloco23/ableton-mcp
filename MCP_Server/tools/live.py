@@ -439,7 +439,8 @@ def register(mcp: Any, get_ableton_connection: Callable[[], Any]) -> None:
         A MIDI pitch bend is no parameter and can't be drawn: bend the instrument's Transpose instead.
 
         Example: a note at beat 2.5 bent up 1.79 st over a 16th and held, then back on beat 3 ->
-          live_clip_envelope("BEND TEST / Operator / Transpose", scene=1, points=[[0, "0 st"], [2.5, "0 st"], [2.75, "+1.79 st"], [3, "0 st"]])
+          live_clip_envelope("BEND TEST / Operator / Transpose", scene=1, points=[[0, "0 st"], [2.5, "0 st"], [2.75, "+1.79 st"], [2.99, "+1.79 st"], [3, "0 st"]])
+        (two points with one value make a hold; the step from 2.99 back to 0 is 0.01 beat long)
         """
         return out(call("live_clip_envelope", target=target, scene=scene, points=points, shape=shape, clear=clear))
 
