@@ -110,7 +110,8 @@ def test_clips_duplicate_mute_and_move(song):
         run(live.clips, song, action="delete", track="SERUM BASS", bars="1-4")
 
 
-def test_clips_groove_by_pool_name_and_none_takes_it_off(song):
+def test_clips_groove_by_pool_name_and_none_is_refused_where_live_cannot_take_one_off(song):
+    """25.11.2026: live_clips groove "none" failed with Live's C++ signature error; Live's API takes no None."""
     song.tracks[0].clip_slots[1] = Slot(Clip("hats", 0.0, 16.0))
     song.tracks[1].clip_slots[1] = Slot(Clip("kick", 0.0, 16.0))
     song.tracks[1].clip_slots[1].clip.groove = song.groove_pool.grooves[0]
@@ -120,9 +121,9 @@ def test_clips_groove_by_pool_name_and_none_takes_it_off(song):
     assert song.tracks[0].clip_slots[1].clip.groove is song.groove_pool.grooves[2]
     r = run(live.clips, song, action="groove", track="SERUM BASS", bars="49", groove="None")
     assert r["clips"] == [{"track": "SERUM BASS", "name": "Bass A", "bars": "49-52", "before": "none", "after": "none"}]
-    r = run(live.clips, song, action="groove", track="SERUM BASS", scene=2, groove="none")
-    assert (r["clips"][0]["before"], r["clips"][0]["after"]) == ("Swing MPC 3000 16ths 57", "none")
-    assert song.tracks[1].clip_slots[1].clip.groove is None
+    with pytest.raises(RuntimeError, match="Live's API can't take a clip's groove off .* Groove chooser to None"):
+        run(live.clips, song, action="groove", track="SERUM BASS", scene=2, groove="none")
+    assert song.tracks[1].clip_slots[1].clip.groove is song.groove_pool.grooves[2]
 
 
 def test_clips_groove_checks_the_name_before_any_clip_changes(song):
@@ -147,9 +148,14 @@ def test_clips_groove_puts_the_old_grooves_back_when_live_refuses_one(song):
 
     song.tracks[0].clip_slots[1] = Slot(Clip("hats", 0.0, 16.0))
     song.tracks[1].clip_slots[1] = Slot(Refusing("loop", 0.0, 16.0))
-    with pytest.raises(RuntimeError, match="'loop' on 'SERUM BASS' refused the groove: no groove here. The 1 clip"):
+    with pytest.raises(RuntimeError, match="'loop' on 'SERUM BASS' refused the groove: no groove here. The 0 clip"
+                                           r"\(s\) before it have their old groove back; 'hats' on 'BASS MID' kept the new one"):
         run(live.clips, song, action="groove", scene="Groove", groove="Swing MPC 3000 16ths 57")
-    assert song.tracks[0].clip_slots[1].clip.groove is None
+    assert song.tracks[0].clip_slots[1].clip.groove is song.groove_pool.grooves[2]  # Live can't put its None back
+    song.tracks[0].clip_slots[1].clip.groove = song.groove_pool.grooves[0]
+    with pytest.raises(RuntimeError, match="The 1 clip\\(s\\) before it have their old groove back$"):
+        run(live.clips, song, action="groove", scene="Groove", groove="Swing MPC 3000 16ths 57")
+    assert song.tracks[0].clip_slots[1].clip.groove is song.groove_pool.grooves[0]
 
 
 def test_tracks_by_name(song):
@@ -159,6 +165,21 @@ def test_tracks_by_name(song):
     assert [t.name for t in song.tracks[:4]] == ["BASS MID", "BASS MID 2", "SERUM BASS", "RESAMPLE"]
     run(live.tracks, song, action="delete", track="BASS MID 2")
     assert "BASS MID 2" not in [t.name for t in song.tracks]
+
+
+def test_a_name_another_track_has_is_refused_before_anything_changes(song):
+    """25.11.2026: a second RISER was created beside the template's, and live_load onto 'RISER' then hit the wrong one."""
+    group = drums_group(song)
+    before = [t.name for t in song.tracks]
+    with pytest.raises(ValueError, match="a track named 'TOP LOOP' is already in '🥁 DRUMS'"):
+        run(live.tracks, song, action="create", in_group="🥁 DRUMS", name="top loop")
+    with pytest.raises(ValueError, match="a track named 'SERUM BASS' is already in the set"):
+        run(live.tracks, song, action="duplicate", track="BASS MID", name="SERUM BASS")
+    with pytest.raises(ValueError, match="'Master' is already in the set"):
+        run(live.tracks, song, action="rename", track="BASS MID", name="Master")
+    assert [t.name for t in song.tracks] == before
+    assert run(live.tracks, song, action="rename", track="KICK", name="kick")["track"] == "kick"  # its own name, recased
+    assert group.name == "🥁 DRUMS"
 
 
 def drums_group(song):

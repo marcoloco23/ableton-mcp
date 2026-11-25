@@ -733,8 +733,9 @@ def clips(song, p, ctrl):
     """Act on arrangement clips that start in `bars`, or on the session clips in `scene`, on one
     track or every track: duplicate | move | delete | mute | unmute | rename | groove | to_arrangement.
 
-    groove gives each clip the groove pool's `groove` ("none" takes it off); if Live refuses one clip,
-    the clips before it get their old groove back. to_arrangement fills the arrangement `bars` with
+    groove gives each clip the groove pool's `groove`; "none" is refused by Live for a clip that has one
+    (NO_GROOVE_OFF), so only clips already without one pass. If Live refuses a clip, the clips before it get
+    their old groove back where Live allows it. to_arrangement fills the arrangement `bars` with
     the scene's clips, each repeated back to back at its own length; a copy that would run past the
     bars is left out and reported.
     """
@@ -806,13 +807,22 @@ def clips(song, p, ctrl):
     if action == "groove":
         was = [c.groove for _, c, _ in chosen]
         for k, (t, c, _) in enumerate(chosen):
+            if c.groove is groove:
+                continue
             try:
                 c.groove = groove
             except Exception as e:
-                for (_, d, _), g in zip(chosen[:k], was):
-                    d.groove = g
-                raise RuntimeError("'%s' on '%s' refused the groove: %s. The %d clip(s) before it have their old "
-                                   "groove back" % (c.name, t.name, e, k))
+                stuck = []
+                for (u, d, _), g in zip(chosen[:k], was):
+                    try:
+                        d.groove = g
+                    except Exception:  # Live takes no None: a clip that had no groove keeps the new one
+                        stuck.append("'%s' on '%s'" % (d.name, u.name))
+                why = (NO_GROOVE_OFF if groove is None else "'%s' on '%s' refused the groove: %s" % (c.name, t.name, e))
+                back = "The %d clip(s) before it have their old groove back" % (k - len(stuck))
+                if stuck:
+                    back += "; %s kept the new one (Live can't take a groove off)" % ", ".join(stuck)
+                raise RuntimeError("%s. %s" % (why, back))
         return {"action": action, "clips": [dict(row, before=_groove_name(g), after=_groove_name(c.groove))
                                             for row, g, (_, c, _) in zip(before, was, chosen)]}
     for t, c, slot in chosen:
@@ -826,6 +836,10 @@ def clips(song, p, ctrl):
         return {"action": action, "clips": before}
     return {"action": action, "clips": [dict(row, name=c.name, **({"muted": bool(c.muted)} if action != "rename" else {}))
                                         for row, (t, c, _) in zip(before, chosen)]}
+
+
+NO_GROOVE_OFF = ("Live's API can't take a clip's groove off (it wants a groove, not None; seen 25.11.2026): in Live, "
+                 "set the clip's Groove chooser to None, or press Commit to write the groove into the notes")
 
 
 def _groove_name(groove):
@@ -972,6 +986,18 @@ def _group(t):
     return {"group": t.group_track.name} if getattr(t, "is_grouped", False) else {}
 
 
+def _name_is_free(song, name, own=None):
+    """Refuse a track name another track has: every tool finds tracks by name, so a second RISER would make the next
+    live_load onto 'RISER' ambiguous (25.11.2026: a new RISER in a group beside the template's audio RISER)."""
+    every = list(song.tracks) + list(song.return_tracks) + [song.master_track]
+    mine = lom.track(song, own) if own else None
+    taken = [t for t in lom._matches(every, name) if t is not mine]
+    if taken:
+        where = ("in '%s'" % taken[0].group_track.name) if getattr(taken[0], "is_grouped", False) else "in the set"
+        raise ValueError("a track named '%s' is already %s: track names must be unique, so pick another name "
+                         "or rename that track first" % (taken[0].name, where))
+
+
 def tracks(song, p, ctrl):
     """create | duplicate | delete | rename tracks, by name.
 
@@ -980,6 +1006,8 @@ def tracks(song, p, ctrl):
     So create with in_group inserts it just before the group's last track, then checks Live put it
     there; if not, the new track is deleted again and the error says where it went."""
     action, name = p.get("action"), p.get("name")
+    if name and action in ("create", "duplicate", "rename"):
+        _name_is_free(song, name, None if action == "create" else p.get("track"))
     if action == "create":
         kind, group = p.get("kind", "midi"), None
         if kind == "return":
