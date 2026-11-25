@@ -65,3 +65,52 @@ def test_install_does_nothing_without_lives_timer():
     c = Ctrl()
     pump.install(c)
     assert not hasattr(c, "_mcp_pump")
+
+
+def test_a_command_never_gets_lost_at_the_idle_moment():
+    """25.11.2026: an automate call timed out; it had been queued in the instant the timer went idle."""
+    r, done = Rig(), []
+    real = r.pump._timer.stop
+
+    def stop_and_race():  # a command arriving while the timer stops must go through Live's tick, not be left behind
+        r.pump.schedule(0, lambda: done.append("late"))
+        real()
+
+    r.timer.stop = stop_and_race
+    r.now = pump.IDLE_S + 1
+    r.timer.fn()
+    assert r.slow and not r.pump._waiting
+
+
+def test_a_command_that_waited_too_long_is_dropped_not_run_late():
+    r, done = Rig(), []
+    r.pump.schedule(0, lambda: done.append(1))
+    r.now = pump.STALE_S + 1
+    r.timer.fn()
+    assert done == [] and "dropped" in r.logged[0]
+
+
+def test_a_reload_replaces_the_old_pump_and_stops_its_timer(monkeypatch):
+    class Old:
+        stopped = False
+
+        def __init__(self):
+            self._slow = lambda *a: None
+            self._timer = type("T", (), {"stop": lambda s: setattr(Old, "stopped", True)})()
+
+    class Ctrl:
+        log_message = staticmethod(lambda m: None)
+
+        def schedule_message(self, *a):
+            pass
+
+    import sys
+    import types
+    live = types.ModuleType("Live.Base")
+    live.Timer = lambda callback, interval, repeat: Timer(callback, interval)
+    monkeypatch.setitem(sys.modules, "Live.Base", live)
+    monkeypatch.setattr(sys.modules["Live"], "Base", live, raising=False)
+    c = Ctrl()
+    c._mcp_pump = Old()
+    pump.install(c)
+    assert Old.stopped and isinstance(c._mcp_pump, pump.Pump) and c.schedule_message == c._mcp_pump.schedule
