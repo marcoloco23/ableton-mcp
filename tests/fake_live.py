@@ -120,7 +120,18 @@ class Clip:
         self.end_marker = self.loop_end
         self.length = self.loop_end - self.loop_start
         self.warping, self.pitch_coarse = True, 0
-        self.groove = None  # a Groove from the song's groove pool, or None as in Live
+        self._groove = None  # a Groove from the song's groove pool, or None as in Live
+
+    @property
+    def groove(self):
+        return self._groove
+
+    @groove.setter
+    def groove(self, g):
+        if g is None:  # Live 12, 25.11.2026: it wants a groove object
+            raise TypeError("Python argument types in None.None(Clip, NoneType) did not match C++ signature: "
+                            "None(TPyHandle<AClip>, TPyHandle<AAbstractGroove>)")
+        self._groove = g
 
     def create_automation_envelope(self, param):
         self.envelopes = getattr(self, "envelopes", {})
