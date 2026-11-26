@@ -24,7 +24,7 @@ def live_memory(logs: Path = LIVE_LOGS) -> tuple[float, float] | None:
     try:
         log = max(logs.glob("Live*/Log.txt"), key=lambda f: f.stat().st_mtime)
         with log.open("rb") as fh:
-            fh.seek(max(0, log.stat().st_size - 20000))
+            fh.seek(max(0, log.stat().st_size - 3_000_000))   # Live logs memory only now and then; Remote Script lines fill the tail
             tail = fh.read().decode("utf-8", "replace")
     except (ValueError, OSError):
         return None
