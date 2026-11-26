@@ -13,6 +13,7 @@ from mcp.server.fastmcp import Context
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
 
+from MCP_Server import live_memory
 from MCP_Server.connection import AbletonError
 
 INSTRUCTIONS = """Ableton Live, the set that is open right now. Conventions every live_* tool shares:
@@ -426,7 +427,16 @@ def register(mcp: Any, get_ableton_connection: Callable[[], Any]) -> None:
           live_load("PERC", "/Users/me/Splice/perc_loop_126.wav", scene="DROP 1", clip={"pitch_coarse": -2, "warping": True})
           live_load("VOX", "/Users/me/Stems/vox_chop.wav", bar=97, clip={"name": "Vox chop"})
         """
-        return out(call("live_load", track=track, item=item, scene=scene, bar=bar, clip=clip))
+        before = live_memory.live_memory()
+        try:
+            result = call("live_load", track=track, item=item, scene=scene, bar=bar, clip=clip)
+        except Exception as e:
+            stop = live_memory.runaway(before)
+            raise ToolError(f"{stop} ({e})" if stop else str(e)) from e
+        stop = live_memory.runaway(before)
+        if stop:
+            raise ToolError(stop)
+        return out(result)
 
     @mcp.tool(annotations=_write("Draw automation into a Session clip", destructive=True, idempotent=True))
     def live_clip_envelope(ctx: Context, target: str, scene: str | int, points: list[list[float | str]],
