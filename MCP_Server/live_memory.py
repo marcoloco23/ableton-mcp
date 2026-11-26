@@ -8,6 +8,7 @@ and for a few seconds after, and a jump stops the work.
 from __future__ import annotations
 
 import re
+import subprocess
 import time
 from pathlib import Path
 
@@ -20,11 +21,33 @@ def _gb(x: str, unit: str) -> float:
 
 
 def live_memory(logs: Path = LIVE_LOGS) -> tuple[float, float] | None:
-    """Live's last logged (virtual, resident) memory in GB, from the newest Live's Log.txt; None if unknown."""
+    """Live's (virtual, resident) memory in GB: from macOS (ps) while Live runs, else the newest Log.txt's last line.
+
+    The log alone is not enough: Live writes MemoryUsage only when it changes, and after a restart the last line
+    can sit far back in the file (26.11.2026 the guard read None for that reason)."""
+    now = _from_ps()
+    if now is not None:
+        return now
+    return _from_log(logs)
+
+
+def _from_ps() -> tuple[float, float] | None:
+    try:
+        out = subprocess.run(["ps", "-Ao", "vsz=,rss=,comm="], capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for line in out.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) == 3 and parts[2].endswith("/MacOS/Live"):
+            return int(parts[0]) / 1048576, int(parts[1]) / 1048576
+    return None
+
+
+def _from_log(logs: Path) -> tuple[float, float] | None:
     try:
         log = max(logs.glob("Live*/Log.txt"), key=lambda f: f.stat().st_mtime)
         with log.open("rb") as fh:
-            fh.seek(max(0, log.stat().st_size - 3_000_000))   # Live logs memory only now and then; Remote Script lines fill the tail
+            fh.seek(max(0, log.stat().st_size - 20_000_000))   # Live logs memory only now and then; Remote Script lines fill the tail
             tail = fh.read().decode("utf-8", "replace")
     except (ValueError, OSError):
         return None

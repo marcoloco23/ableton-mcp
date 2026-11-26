@@ -1,6 +1,13 @@
 """The load guard reads Live's own memory log (26.11.2026: a kept rack ran Live to ~167 GB)."""
 
+import pytest
+
 from MCP_Server import live_memory
+
+
+@pytest.fixture(autouse=True)
+def _no_live_running(monkeypatch):
+    monkeypatch.setattr(live_memory, "_from_ps", lambda: None)
 
 
 def _log(tmp_path, lines):
@@ -24,3 +31,12 @@ def test_a_jump_after_a_load_says_stop_and_a_quiet_load_says_nothing(tmp_path):
 
 def test_no_log_means_no_guess(tmp_path):
     assert live_memory.live_memory(tmp_path) is None and live_memory.runaway(None, wait_s=0) is None
+
+
+def test_a_running_live_is_read_from_ps(monkeypatch):
+    out = "  1234 5000 /usr/bin/other\n444596224 5662310 /Applications/Ableton Live 12 Suite.app/Contents/MacOS/Live\n"
+    monkeypatch.setattr(live_memory.subprocess, "run", lambda *a, **k: type("R", (), {"stdout": out})())
+    monkeypatch.undo()   # the autouse stub: read ps for real through the patched run
+    monkeypatch.setattr(live_memory.subprocess, "run", lambda *a, **k: type("R", (), {"stdout": out})())
+    v, r = live_memory._from_ps()
+    assert round(v) == 424 and round(r, 1) == 5.4
